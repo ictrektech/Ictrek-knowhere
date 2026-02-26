@@ -783,25 +783,6 @@ namespace pipeann {
   template int partition_with_ram_budget<uint8_t>(const std::string data_file, const double sampling_rate,
                                                   double ram_budget, size_t graph_degree,
                                                   const std::string partition_file, size_t num_parts);
-  template int partition_with_ram_budget<knowhere::bf16>(const std::string data_file, const double sampling_rate,
-                                                  double ram_budget, size_t graph_degree,
-                                                  const std::string partition_file, size_t num_parts);
-  template int partition_with_ram_budget<knowhere::fp16>(const std::string data_file, const double sampling_rate,
-                                                  double ram_budget, size_t graph_degree,
-                                                  const std::string partition_file, size_t num_parts);
-
-  template void gen_random_slice<knowhere::fp16>(
-      std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char>>, double, float *&, unsigned long &,
-      unsigned long &);
-  template void gen_random_slice<knowhere::bf16>(
-      std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char>>, double, float *&, unsigned long &,
-      unsigned long &);
-  template void gen_random_slice<knowhere::bf16>(
-      std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char>>,
-      std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char>>, double, unsigned long);
-  template void gen_random_slice<knowhere::fp16>(
-      std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char>>,
-      std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char>>, double, unsigned long);
 
 }  // namespace pipeann
 

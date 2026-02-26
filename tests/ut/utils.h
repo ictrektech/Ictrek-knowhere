@@ -554,6 +554,113 @@ GenEmbListDataSet(int rows, int dim, const uint64_t seed = 42, int each_el_len =
 }
 
 inline knowhere::DataSetPtr
+GenChunkDataSet(int rows, int dim, const uint64_t seed = 42, int each_el_len = 10) {
+    std::mt19937 rng(seed);
+    // use int type to cover test cases for fb16, bf16, int8
+    std::uniform_int_distribution<> distrib(-100.0, 100.0);
+    size_t num_chunk = (rows + each_el_len - 1) / each_el_len;
+    float** chunk_ts = new float*[num_chunk];
+    size_t* lims = new size_t[num_chunk + 1];
+
+    for (size_t chunk_idx = 0; chunk_idx < num_chunk; chunk_idx += 1) {
+        lims[chunk_idx] = chunk_idx * each_el_len;
+        chunk_ts[chunk_idx] = new float[each_el_len * dim];
+        for (size_t i = 0; i < each_el_len * dim; i += 1) {
+            chunk_ts[chunk_idx][i] = (float)distrib(rng);
+        }
+    }
+    lims[num_chunk] = rows;
+
+    auto ds = knowhere::GenDataSet(rows, dim, chunk_ts);
+    ds->SetNumChunk(num_chunk);
+    ds->Set(knowhere::meta::EMB_LIST_OFFSET, (const size_t*)lims);
+    ds->SetIsChunk(true);
+    ds->SetIsOwner(true);
+    return ds;
+}
+
+inline knowhere::DataSetPtr
+GenChunkBinDataSet(int rows, int dim, const uint64_t seed = 42, int each_el_len = 10) {
+    std::mt19937 rng(seed);
+    std::uniform_int_distribution<> distrib(0.0, 100.0);
+    int uint8_dim = dim / 8;
+
+    size_t num_chunk = (rows + each_el_len - 1) / each_el_len;
+    uint8_t** chunk_ts = new uint8_t*[num_chunk];
+    size_t* lims = new size_t[num_chunk + 1];
+
+    for (size_t chunk_idx = 0; chunk_idx < num_chunk; chunk_idx += 1) {
+        lims[chunk_idx] = chunk_idx * each_el_len;
+        chunk_ts[chunk_idx] = new uint8_t[each_el_len * uint8_dim];
+        for (size_t i = 0; i < each_el_len * uint8_dim; i += 1) {
+            chunk_ts[chunk_idx][i] = (uint8_t)distrib(rng);
+        }
+    }
+    lims[num_chunk] = rows;
+
+    auto ds = knowhere::GenDataSet(rows, dim, chunk_ts);
+    ds->SetNumChunk(num_chunk);
+    ds->Set(knowhere::meta::EMB_LIST_OFFSET, (const size_t*)lims);
+    ds->SetIsChunk(true);
+    ds->SetIsOwner(true);
+    return ds;
+}
+
+inline knowhere::DataSetPtr
+GenEmbListDataSetWithSomeEmpty(int rows, int dim, const uint64_t seed = 42, int each_el_len = 10) {
+    std::mt19937 rng(seed);
+    // use int type to cover test cases for fb16, bf16, int8
+    std::uniform_int_distribution<> distrib(-100.0, 100.0);
+    float* ts = new float[rows * dim];
+    for (int i = 0; i < rows * dim; ++i) {
+        ts[i] = (float)distrib(rng);
+    }
+    auto ds = knowhere::GenDataSet(rows, dim, ts);
+    auto ptr = std::make_unique<size_t[]>(size_t(rows / each_el_len) + 2);
+    size_t i = 0;
+    for (; i * each_el_len < (size_t)rows; i += 1) {
+        if (i % 2 == 1) {
+            // make some empty emb lists, like [0, 0, 20, 20, 40, 40, ...]
+            ptr[i] = ptr[i - 1];
+        } else {
+            ptr[i] = i * each_el_len;
+        }
+    }
+    ptr[i] = (size_t)rows;
+    const size_t* ptr_const = ptr.release();
+    ds->Set(knowhere::meta::EMB_LIST_OFFSET, ptr_const);
+    ds->SetIsOwner(true);
+    return ds;
+}
+
+template <typename DataType>
+std::vector<knowhere::DataSetPtr>
+SplitEmbListDataSet(const knowhere::DataSetPtr ds, size_t partition_num, int each_el_len = 10) {
+    auto data = ds->GetTensor();
+    auto rows = ds->GetRows();
+    auto dim = ds->GetDim();
+    auto ptr = ds->Get<const size_t*>(knowhere::meta::EMB_LIST_OFFSET);
+    auto num_el = (rows + each_el_len - 1) / each_el_len;
+
+    auto res = std::vector<knowhere::DataSetPtr>(partition_num);
+    auto each_part_el = num_el / partition_num;
+    for (size_t i = 0; i < partition_num; i++) {
+        auto start_el = i * each_part_el;
+        auto end_el = start_el + each_part_el;
+        if (i == partition_num - 1) {
+            end_el = num_el;
+        }
+        auto cur_rows = (end_el - start_el) * each_el_len;
+        auto ds = knowhere::GenDataSet(cur_rows, dim, (const DataType*)data + start_el * each_el_len * dim);
+        const size_t* ptr_const = ptr + start_el;
+        ds->Set(knowhere::meta::EMB_LIST_OFFSET, ptr_const);
+        ds->SetIsOwner(false);
+        res[i] = std::move(ds);
+    }
+    return res;
+}
+
+inline knowhere::DataSetPtr
 GenEmbListBinDataSet(int rows, int dim, int seed = 42, int each_el_len = 10) {
     std::mt19937 rng(seed);
     std::uniform_int_distribution<> distrib(0.0, 100.0);

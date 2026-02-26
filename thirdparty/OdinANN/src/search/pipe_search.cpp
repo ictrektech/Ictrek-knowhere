@@ -45,6 +45,11 @@ namespace pipeann {
   template<typename T, typename TagT>
   size_t SSDIndex<T, TagT>::pipe_search(const T *query1, const _u64 k_search, const _u32 mem_L, const _u64 l_search,
                                         TagT *res_tags, float *distances, const _u64 beam_width, QueryStats *stats) {
+
+// send_best_read_req() -> send_read_req()
+// calc_best_node() | -> compute_and_push_nbrs() -> compute_pq_dists() -> pq_dist_lookup()
+// 			            | -> compute_exact_dists_and_push() -> dist_cmp->compare()
+                                          
     QueryBuffer<T> *query_buf = pop_query_buf(query1);
 #ifdef USE_AIO
     void *ctx = reader->get_ctx();
@@ -65,29 +70,29 @@ namespace pipeann {
     query_buf->reset();
 
     // pointers to buffers for data
-    T *data_buf = query_buf->coord_scratch;
+    T *data_buf = query_buf->coord_scratch; // 存储从磁盘读取的原始向量数据副本，用于精确距离计算
 #if defined(__ARM_NEON) && defined(__aarch64__)
     __builtin_prefetch((const char *) data_buf, 0, 2);
 #else
     _mm_prefetch((char *) data_buf, _MM_HINT_T1);
 #endif
     // sector scratch
-    char *sector_scratch = query_buf->sector_scratch;
+    char *sector_scratch = query_buf->sector_scratch; // 存储从磁盘读取的原始扇区数据，后续再从这里解析出向量节点的邻居列表、PQ 编码等信息
 
     // query <-> neighbor list
-    float *dist_scratch = query_buf->aligned_dist_scratch;
-    _u8 *pq_coord_scratch = query_buf->aligned_pq_coord_scratch;
+    float *dist_scratch = query_buf->aligned_dist_scratch; // 存储批量节点的 PQ 估算距离（临时结果）
+    _u8 *pq_coord_scratch = query_buf->aligned_pq_coord_scratch; // 存储批量节点的PQ 编码序列（每个子空间 1 字节编码）,方便后续批量查表计算 PQ 距离
 
     Timer query_timer;
-    std::vector<Neighbor> retset(mem_L + l_search * 10);
+    std::vector<Neighbor> retset(mem_L + l_search * 10); // 当前查询向量的所有候选邻居节点(包含内存图的PQ距离筛选)，当搜索的节点数超过 l_search 时会动态扩容
     auto &visited = *(query_buf->visited);
     unsigned cur_list_size = 0;
 
-    std::vector<Neighbor> full_retset;
+    std::vector<Neighbor> full_retset; // 当前查询向量的所有候选邻居节点
     full_retset.reserve(l_search * 10);
 
     // query <-> PQ chunk centers distances
-    float *pq_dists = query_buf->aligned_pqtable_dist_scratch;
+    float *pq_dists = query_buf->aligned_pqtable_dist_scratch; // 存储查询向量与所有 PQ 子空间聚类中心的距离表（预计算的核心表）
 
 #ifndef OVERLAP_INIT
     pq_table.populate_chunk_distances(query, pq_dists);  // overlap with the first I/O.
@@ -96,10 +101,13 @@ namespace pipeann {
     // lambda to batch compute query<-> node distances in PQ space
     auto compute_pq_dists = [this, pq_coord_scratch, pq_dists](const unsigned *ids, const _u64 n_ids,
                                                                float *dists_out) {
+      // 从索引数据中提取对应的PQ编码并保存到pq_coord_scratch
       ::aggregate_coords(ids, n_ids, this->data.data(), this->n_chunks, pq_coord_scratch);
+      // 根据 pq_coord_scratch 中的编码，从 pq_dists 中查表得到子空间距离，累加后得到最终 PQ 距离
       ::pq_dist_lookup(pq_coord_scratch, n_ids, this->n_chunks, pq_dists, dists_out);
     };
 
+    // 计算精确距离并将邻居节点插入完整结果列表full_retset
     auto compute_exact_dists_and_push = [&](const char *node_buf, const unsigned id) -> float {
       T *node_fp_coords_copy = data_buf;
       memcpy(node_fp_coords_copy, node_buf, data_dim * sizeof(T));
@@ -109,11 +117,13 @@ namespace pipeann {
     };
 
     uint64_t n_computes = 0;
+    // 计算PQ累加距离（快速计算，模糊距离）并将邻居节点插入候选列表retset
     auto compute_and_push_nbrs = [&](const char *node_buf, unsigned &nk) {
       unsigned *node_nbrs = offset_to_node_nhood(node_buf);
-      unsigned nnbrs = *(node_nbrs++);
+      unsigned nnbrs = *(node_nbrs++); // 这里的邻居数固定为索引构建时设置的MAX_DEGREE
       unsigned nbors_cand_size = 0;
       for (unsigned m = 0; m < nnbrs; ++m) {
+        // 找出未被访问的邻居向量节点放到node_nbrs
         if (visited.find(node_nbrs[m]) == visited.end()) {
           node_nbrs[nbors_cand_size++] = node_nbrs[m];
           visited.insert(node_nbrs[m]);
@@ -130,8 +140,10 @@ namespace pipeann {
           if (stats != nullptr) {
             stats->n_cmps++;
           }
+          // 核心筛选条件：PQ距离超过候选集最差值，且候选集已满（这里的l_search从L_ONDISK_INDEX="100 150 200"取值） → 直接跳过
           if (nbor_dist >= retset[cur_list_size - 1].distance && (cur_list_size == l_search))
             continue;
+          // 否则：将当前的邻居节点加入候选集
           Neighbor nn(nbor_id, nbor_dist, true);
           // Return position in sorted list where nn inserted
           auto r = InsertIntoPool(retset.data(), cur_list_size, nn);  // may be overflow in retset...
@@ -181,6 +193,7 @@ namespace pipeann {
     } else {
       // cannot overlap.
       pq_table.populate_chunk_distances_nt(query, pq_dists);
+      // 添加第一个候选邻居节点初始化候选集
       compute_pq_dists(&medoids[0], 1, dist_scratch);
       add_to_retset(&medoids[0], 1, dist_scratch);
     }
@@ -198,28 +211,38 @@ namespace pipeann {
 
     std::queue<io_t> on_flight_ios;
     auto send_read_req = [&](Neighbor &item) -> bool {
+      // 步骤1：标记节点状态为"已发送IO"，避免重复发送
       item.flag = false;
 
+      // 步骤2：锁定节点对应的磁盘页面，保证并发安全
       // lock the corresponding page.
       this->lock_idx(idx_lock_table, item.id, std::vector<uint32_t>(), true);
+      // 步骤3：计算节点对应的磁盘位置信息（核心映射关系）
       const unsigned loc = id2loc(item.id), pid = loc_sector_no(loc);
 
+      // 步骤4：获取并计算IO缓冲区的地址（循环复用扇区缓冲区sector_scratch）
+      // 按扇区粒度读取：磁盘 IO 的最小高效单位是扇区（4KB），按扇区读取能减少 IO 次数，提升磁盘吞吐量
       uint64_t &cur_buf_idx = query_buf->sector_idx;
       auto buf = sector_scratch + cur_buf_idx * size_per_io;
+      // 步骤5：获取并构造IO请求对象（复用预分配的reqs数组）
       auto &req = query_buf->reqs[cur_buf_idx];
       req = IORequest(static_cast<_u64>(pid) * SECTOR_LEN_ODIN, size_per_io, buf, u_loc_offset(loc), max_node_len);
+      // 步骤6：发送异步IO请求（无内存分配版）
       reader->send_read_no_alloc(req, ctx);
 
+      // 步骤7：记录飞行中IO（便于后续轮询完成状态）
       on_flight_ios.push(io_t{item, pid, loc, &req});
+      // 步骤8：更新缓冲区索引（循环复用，取模避免越界）
       cur_buf_idx = (cur_buf_idx + 1) % MAX_N_SECTOR_READS_ODIN;
 
+      // 步骤9：统计IO次数（如果需要输出统计信息）
       if (stats != nullptr) {
         stats->n_ios++;
       }
       return true;
     };
 
-    std::unordered_map<unsigned, char *> id_buf_map;
+    std::unordered_map<unsigned, char *> id_buf_map; // 向量id与其向量数据(真正从磁盘读取)缓冲区的映射
     auto poll_all = [&]() -> std::pair<int, int> {
       // poll once.
       reader->poll_all(ctx);
@@ -314,7 +337,7 @@ namespace pipeann {
 
     auto cpu2_st = std::chrono::high_resolution_clock::now();
     send_best_read_req(cur_beam_width - on_flight_ios.size());
-    unsigned marker = 0, max_marker = 0;
+    unsigned marker = 0, max_marker = 0; // 已处理的候选节点的最大索引（标记搜索进度，>=5 表示搜索进入稳定阶段）
 #ifdef OVERLAP_INIT
     if (likely(mem_L != 0)) {
       pq_table.populate_chunk_distances_nt(query, pq_dists);  // overlap with the first I/O.

@@ -21,7 +21,6 @@
 #include <sys/syscall.h>
 #include "linux_aligned_file_reader.h"
 
-
 namespace pipeann {
   template<typename T, typename TagT>
   int SSDIndex<T, TagT>::insert_in_place(const T *point, const TagT &tag, tsl::robin_set<uint32_t> *deletion_set) {

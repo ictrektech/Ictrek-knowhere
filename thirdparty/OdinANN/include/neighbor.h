@@ -9,7 +9,7 @@
 namespace pipeann {
 
   struct Neighbor {
-    unsigned id;
+    unsigned id; // 索引中向量节点的全局唯一标识, 取值范围[0, 总向量数 - 1]
     float distance;
     bool flag;
     bool visited;
@@ -159,4 +159,4 @@ namespace pipeann {
     addr[right] = nn;
     return right;
   }
-}; // namespace pipeann
+}  // namespace pipeann

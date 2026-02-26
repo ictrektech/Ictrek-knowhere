@@ -29,6 +29,7 @@
 #include "knowhere/bitsetview_idselector.h"
 #include "knowhere/comp/task.h"
 #include "knowhere/config.h"
+#include "knowhere/context.h"
 #include "knowhere/operands.h"
 #include "knowhere/range_util.h"
 namespace knowhere {
@@ -85,7 +86,8 @@ class DataViewIndexBase {
 
     virtual void
     Search(const idx_t n, const void* __restrict x, const idx_t k, float* __restrict distances,
-           idx_t* __restrict labels, const BitsetView& bitset, const bool use_quant) const = 0;
+           idx_t* __restrict labels, const BitsetView& bitset, milvus::OpContext* op_context,
+           const bool use_quant) const = 0;
 
     /** Knn Search on set of vectors
      *
@@ -102,9 +104,22 @@ class DataViewIndexBase {
                   const idx_t* __restrict ids, const idx_t k, float* __restrict out_dist, idx_t* __restrict out_ids,
                   const bool use_quant) const = 0;
 
+    /**
+     * @brief Calculate distances between query vectors and reference vectors by IDs
+     *
+     * @param num_queries  number of query vectors
+     * @param queries      query vectors, size num_queries * d
+     * @param num_ids      total number of selected ids
+     * @param ids          selected ids for each query
+     * @param out_dist     result distances, size num_queries * num_ids
+     */
+    virtual void
+    CalcDistByIDs(const idx_t num_queries, const void* __restrict queries, const idx_t num_ids,
+                  const idx_t* __restrict ids, float* __restrict out_dist, const bool use_quant) const = 0;
+
     virtual RangeSearchResult
     RangeSearch(const idx_t n, const void* __restrict x, const float radius, const float range_filter,
-                const BitsetView& bitset, const bool use_quant) const = 0;
+                const BitsetView& bitset, milvus::OpContext* op_context, const bool use_quant) const = 0;
 
     /** Range Search on set of vectors
      *
@@ -151,6 +166,10 @@ class DataViewIndexBase {
     std::shared_ptr<QuantRefine>
     GetQuantData() const {
         return quant_data_;
+    }
+    std::optional<size_t>
+    GetQueryCodeSize() const {
+        return code_size_;
     }
 
  protected:
@@ -242,16 +261,21 @@ class DataViewIndexFlat : public DataViewIndexBase {
 
     void
     Search(const idx_t n, const void* __restrict x, const idx_t k, float* __restrict distances,
-           idx_t* __restrict labels, const BitsetView& bitset, const bool use_quant) const override;
+           idx_t* __restrict labels, const BitsetView& bitset, milvus::OpContext* op_context,
+           const bool use_quant) const override;
 
     void
     SearchWithIds(const idx_t n, const void* __restrict x, const idx_t* __restrict ids_num_lims,
                   const idx_t* __restrict ids, const idx_t k, float* __restrict out_dist, idx_t* __restrict out_ids,
                   const bool use_quant) const override;
 
+    void
+    CalcDistByIDs(const idx_t num_queries, const void* __restrict queries, const idx_t num_ids,
+                  const idx_t* __restrict ids, float* __restrict out_dist, const bool use_quant) const override;
+
     RangeSearchResult
     RangeSearch(const idx_t n, const void* __restrict x, const float radius, const float range_filter,
-                const BitsetView& bitset, const bool use_quant) const override;
+                const BitsetView& bitset, milvus::OpContext* op_context, const bool use_quant) const override;
 
     RangeSearchResult
     RangeSearchWithIds(const idx_t n, const void* __restrict x, const idx_t* __restrict ids_num_lims,
@@ -318,7 +342,8 @@ DataViewIndexFlat::exhaustive_search_in_one_query_impl(const std::unique_ptr<fai
 
 void
 DataViewIndexFlat::Search(const idx_t n, const void* __restrict x, const idx_t k, float* __restrict distances,
-                          idx_t* __restrict labels, const BitsetView& bitset, const bool use_quant) const {
+                          idx_t* __restrict labels, const BitsetView& bitset, milvus::OpContext* op_context,
+                          const bool use_quant) const {
     // todo: need more test to check
     const auto& search_pool = ThreadPool::GetGlobalSearchThreadPool();
     std::vector<folly::Future<folly::Unit>> futs;
@@ -328,6 +353,7 @@ DataViewIndexFlat::Search(const idx_t n, const void* __restrict x, const idx_t k
             faiss::HeapBlockResultHandler<CMAX> res(n, distances, labels, k);
             for (auto i = 0; i < n; i++) {
                 futs.emplace_back(search_pool->push([&] {
+                    knowhere::checkCancellation(op_context);
                     ThreadPool::ScopedSearchOmpSetter setter(1);
                     faiss::HeapBlockResultHandler<CMAX>::SingleResultHandler resi(res);
                     auto computer = SelectDataViewComputer(view_data_, data_type_, metric_type_, d_, is_cosine_,
@@ -347,6 +373,7 @@ DataViewIndexFlat::Search(const idx_t n, const void* __restrict x, const idx_t k
             faiss::HeapBlockResultHandler<CMIN> res(n, distances, labels, k);
             for (auto i = 0; i < n; i++) {
                 futs.emplace_back(search_pool->push([&] {
+                    knowhere::checkCancellation(op_context);
                     ThreadPool::ScopedSearchOmpSetter setter(1);
                     faiss::HeapBlockResultHandler<CMIN>::SingleResultHandler resi(res);
                     auto computer = SelectDataViewComputer(view_data_, data_type_, metric_type_, d_, is_cosine_,
@@ -433,7 +460,7 @@ DataViewIndexFlat::SearchWithIds(const idx_t n, const void* __restrict x, const 
                 std::shared_lock lock(norms_mutex_);
                 for (auto j = 0; j < base_n; j++) {
                     if (base_ids[j] != -1) {
-                        base_dist[j] = base_dist[j] / norms_[base_ids[j]];
+                        base_dist[j] /= norms_[base_ids[j]];
                     }
                 }
             }
@@ -450,9 +477,32 @@ DataViewIndexFlat::SearchWithIds(const idx_t n, const void* __restrict x, const 
     return;
 }
 
+void
+DataViewIndexFlat::CalcDistByIDs(const idx_t num_queries, const void* __restrict queries, const idx_t num_ids,
+                                 const idx_t* __restrict ids, float* __restrict out_dist, const bool use_quant) const {
+    const auto& search_pool = ThreadPool::GetGlobalSearchThreadPool();
+    std::vector<folly::Future<folly::Unit>> futs;
+    futs.reserve(num_queries);
+    for (auto i = 0; i < num_queries; i++) {
+        futs.emplace_back(search_pool->push([&, idx = i] {
+            ThreadPool::ScopedSearchOmpSetter setter(1);
+            auto query = (const char*)queries + code_size_ * idx;
+            ComputeDistanceSubset(query, num_ids, out_dist + idx * num_ids, ids, use_quant);
+            if (is_cosine_) {
+                std::shared_lock lock(norms_mutex_);
+                for (auto j = 0; j < num_ids; j++) {
+                    out_dist[idx * num_ids + j] /= norms_[ids[j]];
+                }
+            }
+        }));
+    }
+    WaitAllSuccess(futs);
+    return;
+}
+
 RangeSearchResult
 DataViewIndexFlat::RangeSearch(const idx_t n, const void* __restrict x, const float radius, const float range_filter,
-                               const BitsetView& bitset, const bool use_quant) const {
+                               const BitsetView& bitset, milvus::OpContext* op_context, const bool use_quant) const {
     // todo: need more test to check
     std::vector<std::vector<float>> result_dist_array(n);
     std::vector<std::vector<idx_t>> result_id_array(n);
@@ -471,6 +521,7 @@ DataViewIndexFlat::RangeSearch(const idx_t n, const void* __restrict x, const fl
     if (metric_type_ == metric::L2) {
         for (auto i = 0; i < n; i++) {
             futs.emplace_back(search_pool->push([&, i = i] {
+                knowhere::checkCancellation(op_context);
                 ThreadPool::ScopedSearchOmpSetter setter(1);
                 auto computer = SelectDataViewComputer(view_data_, data_type_, metric_type_, d_, is_cosine_,
                                                        use_quant ? quant_data_ : nullptr);

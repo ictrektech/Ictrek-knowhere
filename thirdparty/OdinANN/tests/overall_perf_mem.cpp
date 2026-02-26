@@ -78,7 +78,7 @@ template<typename T>
 inline uint64_t save_bin_test(const std::string &filename, T *id, float *dist, size_t npts, size_t ndims,
                               size_t offset = 0) {
   std::ofstream writer;
-  open_file_to_write(writer, filename);
+  pipeann::open_file_to_write(writer, filename);
 
   std::cout << "Writing bin: " << filename.c_str() << std::endl;
   writer.seekp(offset, writer.beg);
@@ -107,7 +107,7 @@ void sync_search_kernel(T *query, size_t query_num, size_t query_aligned_dim, co
   float *gt_dists = NULL;
   size_t gt_num, gt_dim;
 
-  if (!file_exists(truthset_file)) {
+  if (!pipeann::file_exists(truthset_file)) {
     calRecall = false;
   }
 

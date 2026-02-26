@@ -15,12 +15,15 @@
 #include <iostream>
 #include <fstream>
 
+#include "filemanager/FileManager.h"
+#include "filemanager/impl/LocalFileManager.h"
 #include "catch2/catch_test_macros.hpp"
 #include "catch2/generators/catch_generators.hpp"
 #include "knowhere/feder/OdinANN.h"
 #include "knowhere/index/index_factory.h"
 #include "knowhere/index/index_node_data_mock_wrapper.h"
 #include "utils.h"
+#include "index/odinann/odinann_config.h"
 
 #ifdef KNOWHERE_WITH_CARDINAL
 constexpr char kOdinAnn[] = "ODINANN_DEPRECATED";
@@ -73,11 +76,12 @@ TEST_CASE("OdinANN basic test", "[odinann]") {
     const std::string data_file = "/tmp/odinann_test_data.bin";
     WriteBinaryFile(data_file, base_data);
     
+    auto version = knowhere::Version::GetCurrentVersion().VersionNumber();
+    std::shared_ptr<milvus::FileManager> file_manager = std::make_shared<milvus::LocalFileManager>();
+    auto odinann_index_pack = knowhere::Pack(file_manager);
     // Create index
-    auto index = knowhere::IndexFactory::Instance().Create(
-        kOdinAnn, knowhere::Version::GetCurrentVersion(), knowhere::Object());
-    REQUIRE(index != nullptr);
-    
+    auto index = knowhere::IndexFactory::Instance().Create<knowhere::fp32>(kOdinAnn, version, odinann_index_pack).value();
+
     // Configure index
     knowhere::Json json_config;
     json_config["metric_type"] = "L2";
@@ -90,7 +94,8 @@ TEST_CASE("OdinANN basic test", "[odinann]") {
     json_config["data_path"] = data_file;
     json_config["index_prefix"] = "/tmp/odinann_test_index";
     
-    auto cfg = index->CreateConfig();
+    auto cfg = std::make_unique<knowhere::OdinANNConfig>();
+    // auto cfg = index->CreateConfig();
     knowhere::Status status = knowhere::Config::Load(*cfg, json_config, knowhere::PARAM_TYPE::TRAIN);
     REQUIRE(status == knowhere::Status::success);
     
@@ -98,16 +103,16 @@ TEST_CASE("OdinANN basic test", "[odinann]") {
     auto base_dataset = knowhere::GenDataSet(num_vectors, dim, base_data.data());
     
     // Build index
-    status = index->Build(base_dataset, cfg);
+    status = index.Build(base_dataset, json_config);
     REQUIRE(status == knowhere::Status::success);
     
     // Test serialization
     knowhere::BinarySet binset;
-    status = index->Serialize(binset);
+    status = index.Serialize(binset);
     REQUIRE(status == knowhere::Status::success);
     
     // Test deserialization
-    status = index->Deserialize(binset, cfg);
+    status = index.Deserialize(binset, json_config);
     REQUIRE(status == knowhere::Status::success);
     
     // Test search
@@ -118,7 +123,7 @@ TEST_CASE("OdinANN basic test", "[odinann]") {
     status = knowhere::Config::Load(*cfg, json_config, knowhere::PARAM_TYPE::SEARCH);
     REQUIRE(status == knowhere::Status::success);
     
-    auto result = index->Search(query_dataset, cfg, nullptr);
+    auto result = index.Search(query_dataset, json_config, nullptr);
     REQUIRE(result.has_value());
     
     auto ids = result.value()->GetIds();

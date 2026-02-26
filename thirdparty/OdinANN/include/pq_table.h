@@ -3,13 +3,16 @@
 #include "utils.h"
 #if defined(__x86_64__)
 #include <immintrin.h>
+#elif defined(__aarch64__) && defined(USE_SVE2)
+#include <arm_sve.h>  
 #endif
+#include "query_buf.h"
+
 #include <sstream>
 #include <string_view>
 
-
-
 namespace pipeann {
+
 #define NUM_PQ_CENTROIDS_ODIN 256
 #define NUM_PQ_OFFSETS_ODIN 5
   template<typename T>
@@ -139,6 +142,9 @@ namespace pipeann {
 
     void populate_chunk_distances(const T *query_vec, float *dist_vec) {
       memset(dist_vec, 0, 256 * n_chunks * sizeof(float));
+#ifdef USE_SVE2
+      static int32_t max_lanes = SVE_MAX_SUPPORT_BITS / (sizeof(float) * 8);
+      svbool_t op_pred = svwhilelt_b32(0, max_lanes);
       // chunk wise distance computation
       for (_u64 chunk = 0; chunk < n_chunks; chunk++) {
         // sum (q-c)^2 for the dimensions associated with this chunk
@@ -146,12 +152,35 @@ namespace pipeann {
         for (_u64 j = chunk_offsets[chunk]; j < chunk_offsets[chunk + 1]; j++) {
           _u64 permuted_dim_in_query = rearrangement[j];
           const float *centers_dim_vec = tables_T + (256 * j);
+          float query_centroid_gap = query_vec[permuted_dim_in_query] - centroid[permuted_dim_in_query];
+          for (_u64 idx = 0; idx < 256; idx += max_lanes) {
+            svfloat32_t diff_sv = svsub_n_f32_z(op_pred, svld1_f32(op_pred, centers_dim_vec + idx), query_centroid_gap);
+            svfloat32_t chunk_dist_accu_sv = svmla_f32_z(op_pred, svld1_f32(op_pred, chunk_dists + idx), diff_sv, diff_sv);
+            svst1_f32(op_pred, chunk_dists + idx, chunk_dist_accu_sv);
+          }
+        }
+      }
+#else
+      // 遍历每个PQ子空间（chunk）
+      for (_u64 chunk = 0; chunk < n_chunks; chunk++) {
+        // sum (q-c)^2 for the dimensions associated with this chunk
+        float *chunk_dists = dist_vec + (256 * chunk);
+        // 遍历该子空间包含的所有维度
+        for (_u64 j = chunk_offsets[chunk]; j < chunk_offsets[chunk + 1]; j++) {
+          // 查询向量的维度重排（适配PQ分块的维度顺序），比如原始向量维度为768，分块固定为128，那么两个子空间的偏移为6，
+          // 则第一个子空间包含的维度为rearrangement=[0,1,2,3,4,5]，第二个子空间包含的维度为rearrangement=[6,7,8,9,10,11]，以此类推
+          _u64 permuted_dim_in_query = rearrangement[j];
+          // 该维度下256个聚类中心的取值数组
+          const float *centers_dim_vec = tables_T + (256 * j);
+          // 遍历该维度的256个聚类中心
           for (_u64 idx = 0; idx < 256; idx++) {
+            // 核心：计算去中心后的该子空间下查询向量值与聚类中心向量值的差值
             double diff = centers_dim_vec[idx] - (query_vec[permuted_dim_in_query] - centroid[permuted_dim_in_query]);
             chunk_dists[idx] += (float) (diff * diff);
           }
         }
       }
+#endif
     }
 
     void populate_chunk_distances_nt(const T *query_vec, float *dist_vec) {
@@ -177,7 +206,6 @@ namespace pipeann {
         }
       }
 #else
-      // TODO: for non-AVX512 machines, do non-temporal population.
       return populate_chunk_distances(query_vec, dist_vec);
 #endif
     }

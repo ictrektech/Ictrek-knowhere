@@ -35,6 +35,7 @@ struct IndexIVFRaBitQWrapper : faiss::Index {
     // * faiss::IndexPreTransform + faiss::IndexIVFRaBitQ
     // * faiss::IndexPreTransform + faiss::IndexRefine + faiss::IndexIVFRaBitQ
     std::unique_ptr<faiss::Index> index;
+    mutable std::optional<size_t> size_cache_ = std::nullopt;
 
     IndexIVFRaBitQWrapper(std::unique_ptr<faiss::Index>&& index_in);
 

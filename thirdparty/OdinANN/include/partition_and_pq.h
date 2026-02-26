@@ -25,9 +25,6 @@ template<typename T>
 void gen_random_slice(const T *inputdata, size_t npts, size_t ndims, double p_val, float *&sampled_data,
                       size_t &slice_size);
 
-
-
-
 template<typename T>
 int estimate_cluster_sizes(const std::string data_file, float *pivots, const size_t num_centers, const size_t dim,
                            const size_t k_base, std::vector<size_t> &cluster_sizes);

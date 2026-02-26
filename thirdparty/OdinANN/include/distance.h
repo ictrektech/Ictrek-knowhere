@@ -32,7 +32,7 @@ namespace pipeann {
     virtual float compare(const float *a, const float *b, uint32_t length) const;
   };
 
-  class SlowDistanceCosineUInt8 : public Distance<uint8_t> {
+  class DistanceCosineUInt8 : public Distance<uint8_t> {
    public:
     virtual float compare(const uint8_t *a, const uint8_t *b, uint32_t length) const;
   };

@@ -1,5 +1,7 @@
 #if defined(__x86_64__)
 #include <immintrin.h>
+#elif defined(__aarch64__) && defined(USE_SVE2)
+#include <arm_sve.h>  
 #endif
 #include <iostream>
 #include <vector>
@@ -22,6 +24,127 @@ namespace pipeann {
     return cos_sim;
   }
 
+#ifdef USE_SVE2
+  float compute_cosine_similarity_sve2_int8(const int8_t *a, const int8_t *b, uint64_t ndims) {
+    svint32_t aaAccumSv = svdup_n_s32(0);
+    svint32_t bbAccumSv = svdup_n_s32(0);
+    svint32_t abAccumSv = svdup_n_s32(0);
+    for (uint64_t i = 0; i < ndims; i += 16) {
+      svint8_t vaS8 = svld1_s8(svwhilelt_b8(0, 16), &a[i]);
+      svint16_t vaS16Low = svunpklo_s16(vaS8);
+      svint16_t vaS16High = svunpkhi_s16(vaS8);
+      svint32_t vaS32Sv1 = svunpklo_s32(vaS16Low);
+      svint32_t vaS32Sv2 = svunpkhi_s32(vaS16Low);
+      svint32_t vaS32Sv3 = svunpklo_s32(vaS16High);
+      svint32_t vaS32Sv4 = svunpkhi_s32(vaS16High);
+
+      svint8_t vbs8 = svld1_s8(svwhilelt_b8(0, 16), &b[i]);
+      svint16_t vbS16Low = svunpklo_s16(vbs8);
+      svint16_t vbS16High = svunpkhi_s16(vbs8);
+      svint32_t vbS32Sv1 = svunpklo_s32(vbS16Low);
+      svint32_t vbS32Sv2 = svunpkhi_s32(vbS16Low);
+      svint32_t vbS32Sv3 = svunpklo_s32(vbS16High);
+      svint32_t vbS32Sv4 = svunpkhi_s32(vbS16High);
+
+      aaAccumSv = svmla_s32_z(svwhilelt_b32(0, 4), aaAccumSv, vaS32Sv1, vaS32Sv1);
+      aaAccumSv = svmla_s32_z(svwhilelt_b32(0, 4), aaAccumSv, vaS32Sv2, vaS32Sv2);
+      aaAccumSv = svmla_s32_z(svwhilelt_b32(0, 4), aaAccumSv, vaS32Sv3, vaS32Sv3);
+      aaAccumSv = svmla_s32_z(svwhilelt_b32(0, 4), aaAccumSv, vaS32Sv4, vaS32Sv4);
+
+      bbAccumSv = svmla_s32_z(svwhilelt_b32(0, 4), bbAccumSv, vbS32Sv1, vbS32Sv1);
+      bbAccumSv = svmla_s32_z(svwhilelt_b32(0, 4), bbAccumSv, vbS32Sv2, vbS32Sv2);
+      bbAccumSv = svmla_s32_z(svwhilelt_b32(0, 4), bbAccumSv, vbS32Sv3, vbS32Sv3);
+      bbAccumSv = svmla_s32_z(svwhilelt_b32(0, 4), bbAccumSv, vbS32Sv4, vbS32Sv4);
+
+      abAccumSv = svmla_s32_z(svwhilelt_b32(0, 4), abAccumSv, vaS32Sv1, vbS32Sv1);
+      abAccumSv = svmla_s32_z(svwhilelt_b32(0, 4), abAccumSv, vaS32Sv2, vbS32Sv2);
+      abAccumSv = svmla_s32_z(svwhilelt_b32(0, 4), abAccumSv, vaS32Sv3, vbS32Sv3);
+      abAccumSv = svmla_s32_z(svwhilelt_b32(0, 4), abAccumSv, vaS32Sv4, vbS32Sv4);
+    }
+    float aaAccum = (float)svaddv_s32(svwhilelt_b32(0, 4), aaAccumSv);
+    float bbAccum = (float)svaddv_s32(svwhilelt_b32(0, 4), bbAccumSv);
+    float abAccum = (float)svaddv_s32(svwhilelt_b32(0, 4), abAccumSv);
+    for (uint64_t i = (ndims / 16) * 16; i < ndims; ++i) {
+      aaAccum += ((float) a[i]) * ((float) a[i]);
+      bbAccum += ((float) b[i]) * ((float) b[i]);
+      abAccum += ((float) a[i]) * ((float) b[i]);
+    }
+    return abAccum / (std::sqrt(aaAccum) * std::sqrt(bbAccum));
+  }
+
+  float compute_cosine_similarity_sve2_uint8(const uint8_t *a, const uint8_t *b, uint64_t ndims) {
+    svuint32_t aaAccumSv = svdup_n_u32(0);
+    svuint32_t bbAccumSv = svdup_n_u32(0);
+    svuint32_t abAccumSv = svdup_n_u32(0);
+    for (uint64_t i = 0; i < ndims; i += 16) {
+      svuint8_t vaU8 = svld1_u8(svwhilelt_b8(0, 16), &a[i]);
+      svuint16_t vaU16Low = svunpklo_u16(vaU8);
+      svuint16_t vaU16High = svunpkhi_u16(vaU8);
+      svuint32_t vaU32Sv1 = svunpklo_u32(vaU16Low);
+      svuint32_t vaU32Sv2 = svunpkhi_u32(vaU16Low);
+      svuint32_t vaU32Sv3 = svunpklo_u32(vaU16High);
+      svuint32_t vaU32Sv4 = svunpkhi_u32(vaU16High);
+
+      svuint8_t vbU8 = svld1_u8(svwhilelt_b8(0, 16), &b[i]);
+      svuint16_t vbU16Low = svunpklo_u16(vbU8);
+      svuint16_t vbU16High = svunpkhi_u16(vbU8);
+      svuint32_t vbU32Sv1 = svunpklo_u32(vbU16Low);
+      svuint32_t vbU32Sv2 = svunpkhi_u32(vbU16Low);
+      svuint32_t vbU32Sv3 = svunpklo_u32(vbU16High);
+      svuint32_t vbU32Sv4 = svunpkhi_u32(vbU16High);
+
+      aaAccumSv = svmla_u32_z(svwhilelt_b32(0, 4), aaAccumSv, vaU32Sv1, vaU32Sv1);
+      aaAccumSv = svmla_u32_z(svwhilelt_b32(0, 4), aaAccumSv, vaU32Sv2, vaU32Sv2);
+      aaAccumSv = svmla_u32_z(svwhilelt_b32(0, 4), aaAccumSv, vaU32Sv3, vaU32Sv3);
+      aaAccumSv = svmla_u32_z(svwhilelt_b32(0, 4), aaAccumSv, vaU32Sv4, vaU32Sv4);
+
+      bbAccumSv = svmla_u32_z(svwhilelt_b32(0, 4), bbAccumSv, vbU32Sv1, vbU32Sv1);
+      bbAccumSv = svmla_u32_z(svwhilelt_b32(0, 4), bbAccumSv, vbU32Sv2, vbU32Sv2);
+      bbAccumSv = svmla_u32_z(svwhilelt_b32(0, 4), bbAccumSv, vbU32Sv3, vbU32Sv3);
+      bbAccumSv = svmla_u32_z(svwhilelt_b32(0, 4), bbAccumSv, vbU32Sv4, vbU32Sv4);
+
+      abAccumSv = svmla_u32_z(svwhilelt_b32(0, 4), abAccumSv, vaU32Sv1, vbU32Sv1);
+      abAccumSv = svmla_u32_z(svwhilelt_b32(0, 4), abAccumSv, vaU32Sv2, vbU32Sv2);
+      abAccumSv = svmla_u32_z(svwhilelt_b32(0, 4), abAccumSv, vaU32Sv3, vbU32Sv3);
+      abAccumSv = svmla_u32_z(svwhilelt_b32(0, 4), abAccumSv, vaU32Sv4, vbU32Sv4);
+    }
+    float aaAccum = (float)svaddv_u32(svwhilelt_b32(0, 4), aaAccumSv);
+    float bbAccum = (float)svaddv_u32(svwhilelt_b32(0, 4), bbAccumSv);
+    float abAccum = (float)svaddv_u32(svwhilelt_b32(0, 4), abAccumSv);
+    for (uint64_t i = (ndims / 16) * 16; i < ndims; ++i) {
+      aaAccum += ((float) a[i]) * ((float) a[i]);
+      bbAccum += ((float) b[i]) * ((float) b[i]);
+      abAccum += ((float) a[i]) * ((float) b[i]);
+    }
+    return abAccum / (std::sqrt(aaAccum) * std::sqrt(bbAccum));
+  }
+
+  float compute_cosine_similarity_sve2_float(const float *a, const float *b, uint64_t ndims) {
+    static int32_t maxLanes = SVE_MAX_SUPPORT_BITS / (sizeof(float) * 8);
+    svbool_t opPred = svwhilelt_b32(0, maxLanes);
+    svfloat32_t aaAccumSv = svdup_n_f32(0.0f);
+    svfloat32_t bbAccumSv = svdup_n_f32(0.0f);
+    svfloat32_t abAccumSv = svdup_n_f32(0.0f);
+    for (uint64_t i = 0; i < ndims; i += maxLanes) {
+      svfloat32_t vaF32 = svld1_f32(opPred, &a[i]);
+      svfloat32_t vbF32 = svld1_f32(opPred, &b[i]);
+
+      aaAccumSv = svmla_f32_z(opPred, aaAccumSv, vaF32, vaF32);
+      bbAccumSv = svmla_f32_z(opPred, bbAccumSv, vbF32, vbF32);
+      abAccumSv = svmla_f32_z(opPred, abAccumSv, vaF32, vbF32);
+    }
+    float aaAccum = (float)svaddv_f32(opPred, aaAccumSv);
+    float bbAccum = (float)svaddv_f32(opPred, bbAccumSv);
+    float abAccum = (float)svaddv_f32(opPred, abAccumSv);
+    for (uint64_t i = (ndims / maxLanes) * maxLanes; i < ndims; ++i) {
+      aaAccum += ((float) a[i]) * ((float) a[i]);
+      bbAccum += ((float) b[i]) * ((float) b[i]);
+      abAccum += ((float) a[i]) * ((float) b[i]);
+    }
+    return abAccum / (std::sqrt(aaAccum) * std::sqrt(bbAccum));
+  }
+#endif
+
   std::vector<float> compute_cosine_similarity_batch(const float *query, const unsigned *indices, const float *all_data,
                                                      const unsigned ndims, const unsigned npts) {
     std::vector<float> cos_dists;
@@ -29,29 +152,38 @@ namespace pipeann {
 
     for (size_t i = 0; i < npts; i++) {
       const float *point = all_data + (size_t) (indices[i]) * (size_t) (ndims);
+    #ifdef USE_SVE2
+      cos_dists.push_back(compute_cosine_similarity_sve2_float(point, query, ndims));
+    #else
       cos_dists.push_back(compute_cosine_similarity<float>(point, query, ndims));
+    #endif
     }
     return cos_dists;
   }
 
   // Cosine similarity.
   float DistanceCosineInt8::compare(const int8_t *a, const int8_t *b, uint32_t length) const {
+  #ifdef USE_SVE2
+    return compute_cosine_similarity_sve2_int8(a, b, length);
+  #else
     return pipeann::compute_cosine_similarity(a, b, length);
+  #endif
   }
 
   float DistanceCosineFloat::compare(const float *a, const float *b, uint32_t length) const {
+  #ifdef USE_SVE2
+    return compute_cosine_similarity_sve2_float(a, b, length);
+  #else
     return pipeann::compute_cosine_similarity(a, b, length);
+  #endif
   }
 
-  float SlowDistanceCosineUInt8::compare(const uint8_t *a, const uint8_t *b, uint32_t length) const {
-    int magA = 0, magB = 0, scalarProduct = 0;
-    for (uint32_t i = 0; i < length; i++) {
-      magA += ((uint32_t) a[i]) * ((uint32_t) a[i]);
-      magB += ((uint32_t) b[i]) * ((uint32_t) b[i]);
-      scalarProduct += ((uint32_t) a[i]) * ((uint32_t) b[i]);
-    }
-    // similarity == 1-cosine distance
-    return 1.0f - (float) (scalarProduct / (sqrt(magA) * sqrt(magB)));
+  float DistanceCosineUInt8::compare(const uint8_t *a, const uint8_t *b, uint32_t length) const {
+  #ifdef USE_SVE2
+    return 1.0f - compute_cosine_similarity_sve2_uint8(a, b, length);
+  #else
+    return 1.0f - pipeann::compute_cosine_similarity(a, b, length);
+  #endif
   }
 
 #ifdef USE_AVX512  // AVX512 support.

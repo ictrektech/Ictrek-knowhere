@@ -54,36 +54,23 @@ struct PivotContainer {
   // to be pre-allocated
   void compute_vecs_l2sq(float *vecs_l2sq, float *data, const size_t num_points, const size_t dim) {
 #pragma omp parallel for schedule(static, 8192)
-    for (int64_t n_iter = 0; n_iter < (int64_t) num_points; n_iter++) {
-      float norm = 0.0f;
-      for (size_t j = 0; j < dim; j++) {
-        norm += data[n_iter * dim + j] * data[n_iter * dim + j];
-      }
-      vecs_l2sq[n_iter] = norm;
+    for (int64_t n_iter = 0; n_iter < (_s64) num_points; n_iter++) {
+      vecs_l2sq[n_iter] = cblas_snrm2(dim, (data + (n_iter * dim)), 1);
+      vecs_l2sq[n_iter] *= vecs_l2sq[n_iter];
     }
   }
 
   void rotate_data_randomly(float *data, size_t num_points, size_t dim, float *rot_mat, float *&new_mat,
                             bool transpose_rot) {
+    CBLAS_TRANSPOSE transpose = CblasNoTrans;
     if (transpose_rot) {
       LOG(INFO) << "Transposing rotation matrix..";
+      transpose = CblasTrans;
     }
     LOG(INFO) << "done Rotating data with random matrix..";
 
-    // Simple matrix multiplication implementation
-#pragma omp parallel for schedule(static, 8192)
-    for (size_t i = 0; i < num_points; i++) {
-      for (size_t j = 0; j < dim; j++) {
-        new_mat[i * dim + j] = 0.0f;
-        for (size_t k = 0; k < dim; k++) {
-          if (transpose_rot) {
-            new_mat[i * dim + j] += data[i * dim + k] * rot_mat[j * dim + k];
-          } else {
-            new_mat[i * dim + j] += data[i * dim + k] * rot_mat[k * dim + j];
-          }
-        }
-      }
-    }
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, transpose, num_points, dim, dim, 1.0, data, dim, rot_mat, dim, 0, new_mat,
+                dim);
 
     LOG(INFO) << "done.";
   }
@@ -107,7 +94,6 @@ struct PivotContainer {
       return;
     }
 
-    // Allocate and initialize ones arrays
     float *ones_a = new float[num_centers];
     float *ones_b = new float[num_points];
 
@@ -118,38 +104,19 @@ struct PivotContainer {
       ones_b[i] = 1.0;
     }
 
-    // First matrix multiplication: docs_l2sq * ones_a^T
-#pragma omp parallel for schedule(static, 8192)
-    for (size_t i = 0; i < num_points; i++) {
-      for (size_t j = 0; j < num_centers; j++) {
-        dist_matrix[i * num_centers + j] = docs_l2sq[i] * ones_a[j];
-      }
-    }
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans, num_points, num_centers, 1, 1.0f, docs_l2sq, 1, ones_a, 1,
+                0.0f, dist_matrix, num_centers);
 
-    // Second matrix multiplication: ones_b * centers_l2sq^T, added to existing values
-#pragma omp parallel for schedule(static, 8192)
-    for (size_t i = 0; i < num_points; i++) {
-      for (size_t j = 0; j < num_centers; j++) {
-        dist_matrix[i * num_centers + j] += ones_b[i] * centers_l2sq[j];
-      }
-    }
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans, num_points, num_centers, 1, 1.0f, ones_b, 1, centers_l2sq, 1,
+                1.0f, dist_matrix, num_centers);
 
-    // Third matrix multiplication: -2.0 * data * centers^T, added to existing values
-#pragma omp parallel for schedule(static, 8192)
-    for (size_t i = 0; i < num_points; i++) {
-      for (size_t j = 0; j < num_centers; j++) {
-        float dot_product = 0.0f;
-        for (size_t d = 0; d < dim; d++) {
-          dot_product += data[i * dim + d] * centers[j * dim + d];
-        }
-        dist_matrix[i * num_centers + j] += (-2.0f) * dot_product;
-      }
-    }
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans, num_points, num_centers, dim, -2.0f, data, dim, centers, dim,
+                1.0f, dist_matrix, num_centers);
 
     if (k == 1) {
 #pragma omp parallel for schedule(static, 8192)
-      for (int64_t i = 0; i < (int64_t) num_points; i++) {
-        float min = FLT_MAX;
+      for (int64_t i = 0; i < (_s64) num_points; i++) {
+        float min = std::numeric_limits<float>::max();
         float *current = dist_matrix + (i * num_centers);
         for (size_t j = 0; j < num_centers; j++) {
           if (current[j] < min) {
@@ -180,13 +147,13 @@ struct PivotContainer {
 
   // Given data in num_points * new_dim row major
   // Pivots stored in full_pivot_data as num_centers * new_dim row major
-  // Calculate the closest pivot for each point and store it in vector
-  // closest_centers_ivf (which needs to be allocated outside)
-  // Additionally, if inverted index is not null (and pre-allocated), it will
-  // return inverted index for each center Additionally, if pts_norms_squared is
-  // not null, then it will assume that point norms are pre-computed and use
-  // those
-  // values
+  // Calculate the k closest pivot for each point and store it in vector
+  // closest_centers_ivf (row major, num_points*k) (which needs to be allocated
+  // outside) Additionally, if inverted index is not null (and pre-allocated),
+  // it
+  // will return inverted index for each center, assuming each of the inverted
+  // indices is an empty vector. Additionally, if pts_norms_squared is not null,
+  // then it will assume that point norms are pre-computed and use those values
 
   void compute_closest_centers(float *data, size_t num_points, size_t dim, float *pivot_data, size_t num_centers,
                                size_t k, uint32_t *closest_centers_ivf, std::vector<size_t> *inverted_index,
@@ -226,7 +193,7 @@ struct PivotContainer {
 
 #pragma omp parallel for schedule(static, 1)
       for (int64_t j = cur_blk * PAR_BLOCK_SIZE;
-           j < std::min((int64_t) num_points, (int64_t) ((cur_blk + 1) * PAR_BLOCK_SIZE)); j++) {
+           j < std::min((_s64) num_points, (_s64) ((cur_blk + 1) * PAR_BLOCK_SIZE)); j++) {
         for (size_t l = 0; l < k; l++) {
           size_t this_center_id = closest_centers[(j - cur_blk * PAR_BLOCK_SIZE) * k + l];
           closest_centers_ivf[j * k + l] = (uint32_t) this_center_id;
@@ -321,7 +288,7 @@ namespace kmeans {
       std::vector<float> residuals(nchunks * BUF_PAD, 0.0);
 
 #pragma omp parallel for schedule(static, 32)
-      for (int64_t chunk = 0; chunk < (int64_t) nchunks; ++chunk)
+      for (int64_t chunk = 0; chunk < (_s64) nchunks; ++chunk)
         for (size_t d = chunk * CHUNK_SIZE; d < num_points && d < (chunk + 1) * CHUNK_SIZE; ++d)
           residuals[chunk * BUF_PAD] +=
               math_utils::calc_distance(data + (d * dim), centers + (size_t) closest_center[d] * (size_t) dim, dim);

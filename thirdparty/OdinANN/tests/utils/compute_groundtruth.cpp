@@ -9,7 +9,11 @@
 #include <cstddef>
 #include <cstring>
 #include <queue>
+#ifdef USE_ARMPL
+#include <armpl.h>
+#else
 #include <cblas.h>
+#endif
 #include <stdlib.h>
 
 #include "omp.h"

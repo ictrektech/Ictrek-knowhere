@@ -1,6 +1,8 @@
 #pragma once
 #if defined(__x86_64__)
 #include <immintrin.h>
+#elif defined(__aarch64__) && defined(USE_SVE2)
+#include <arm_sve.h>  
 #endif
 #include <cassert>
 #include <cstdint>
@@ -47,7 +49,7 @@ namespace {
 
   inline void pq_dist_lookup(const _u8 *pq_ids, const _u64 n_pts, const _u64 pq_nchunks, const float *pq_dists,
                              float *dists_out) {
-#if defined(__ARM_NEON__) || defined(__aarch64__)
+#ifdef __aarch64__
     __builtin_prefetch((char *) dists_out, 1, 3);
     __builtin_prefetch((char *) pq_ids, 0, 3);
     __builtin_prefetch((char *) (pq_ids + 64), 0, 3);
@@ -58,11 +60,36 @@ namespace {
     _mm_prefetch((char *) (pq_ids + 64), _MM_HINT_T0);
     _mm_prefetch((char *) (pq_ids + 128), _MM_HINT_T0);
 #endif
+
+#ifdef USE_SVE2
+    static int32_t max_lanes = SVE_MAX_SUPPORT_BITS / (sizeof(float) * 8);
+    svbool_t op_pred = svwhilelt_b32(0, max_lanes);
+    for (size_t idx = 0; idx < n_pts; idx++) {
+      svuint32_t indices_vec;
+      svfloat32_t chunk_dists_vec = svdup_n_f32(0.f);
+      for (size_t chunk = 0; chunk < pq_nchunks; chunk += max_lanes) {
+          indices_vec = svldnt1ub_gather_u32offset_u32(op_pred, pq_ids, svindex_u32(pq_nchunks * idx + chunk, 1));
+          indices_vec = svmul_n_u32_z(op_pred, svadd_u32_z(op_pred, indices_vec, svindex_u32(256 * chunk, 256)), sizeof(float));
+          chunk_dists_vec = svadd_f32_z(op_pred, chunk_dists_vec, svld1_gather_u32offset_f32(op_pred, pq_dists, indices_vec));
+      }
+      dists_out[idx] = (float)svaddv_f32(op_pred, chunk_dists_vec);
+    }
+    if (pq_nchunks % max_lanes) {
+      size_t chunk_start = (pq_nchunks / max_lanes) * max_lanes;
+      for (size_t idx = 0; idx < n_pts; idx++) {
+        for (size_t chunk = chunk_start; chunk < pq_nchunks; chunk++) {
+            const float *chunk_dists = pq_dists + 256 * chunk;
+            uint8_t pq_centerid = pq_ids[pq_nchunks * idx + chunk];
+            dists_out[idx] += chunk_dists[pq_centerid];
+        }
+      }
+    }
+#else
     memset(dists_out, 0, n_pts * sizeof(float));
     for (size_t chunk = 0; chunk < pq_nchunks; chunk++) {
       const float *chunk_dists = pq_dists + 256 * chunk;
       if (chunk < pq_nchunks - 1) {
-#if defined(__ARM_NEON__) || defined(__aarch64__)
+#ifdef __aarch64__
         __builtin_prefetch((char *) (chunk_dists + 256), 0, 3);
 #else
         _mm_prefetch((char *) (chunk_dists + 256), _MM_HINT_T0);
@@ -73,6 +100,7 @@ namespace {
         dists_out[idx] += chunk_dists[pq_centerid];
       }
     }
+#endif
   }
 }  // namespace
 

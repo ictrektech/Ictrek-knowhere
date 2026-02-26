@@ -65,7 +65,7 @@ int search_memory_index(int argc, char **argv) {
 
   pipeann::load_aligned_bin<T>(query_bin, query, query_num, query_dim, query_aligned_dim);
 
-  if (file_exists(truthset_bin)) {
+  if (pipeann::file_exists(truthset_bin)) {
     pipeann::load_truthset(truthset_bin, gt_ids, gt_dists, gt_num, gt_dim, &gt_tags);
     if (gt_num != query_num) {
       std::cout << "Error. Mismatch in number of queries and ground truth data" << std::endl;

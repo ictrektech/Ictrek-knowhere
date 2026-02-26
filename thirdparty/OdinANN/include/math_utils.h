@@ -1,7 +1,12 @@
 #pragma once
 #include <cstdint>
 #include <vector>
+#ifdef USE_ARMPL
+#include <armpl.h>
+#else
 #include <cblas.h>
+#endif
+
 namespace pipeann {
 namespace math_utils {
 

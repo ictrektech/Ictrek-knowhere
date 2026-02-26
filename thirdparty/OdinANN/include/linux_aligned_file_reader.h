@@ -71,4 +71,4 @@ namespace v2 {
       lock_table.unlock(x);
     }
   }
-}  // namespace v2
+}  // namespace pipeann

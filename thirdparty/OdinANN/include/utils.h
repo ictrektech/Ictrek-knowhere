@@ -84,7 +84,6 @@ inline bool file_exists(const std::string &name, bool dirCheck = false) {
   }
 }
 
-
 inline void open_file_to_write(std::ofstream &writer, const std::string &filename) {
   writer.exceptions(std::ofstream::failbit | std::ofstream::badbit);
   if (!file_exists(filename))
@@ -494,4 +493,4 @@ inline int delete_file(const std::string &fileName) {
 template<typename T>
 pipeann::Distance<T> *get_distance_function(pipeann::Metric m);
 
-};  // namespace pipeann
+}  // namespace pipeann

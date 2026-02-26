@@ -24,6 +24,7 @@
 #include <utility>
 #include <vector>
 
+#include "cachinglayer/Manager.h"
 #include "catch2/catch_approx.hpp"
 #include "catch2/catch_test_macros.hpp"
 #include "catch2/generators/catch_generators.hpp"
@@ -70,6 +71,24 @@ match_datasets(const knowhere::DataSetPtr& baseline, const knowhere::DataSetPtr&
             REQUIRE(baseline_data[id * dim + j] == candidate_data[i * dim + j]);
         }
     }
+}
+
+// make sure the two iterators return the same results.
+inline bool
+check_same_iterator(const knowhere::IndexNode::IteratorPtr& iter1, const knowhere::IndexNode::IteratorPtr& iter2) {
+    size_t count = 0;
+    while (iter1->HasNext()) {
+        REQUIRE(iter2->HasNext());
+        auto [id1, dist1] = iter1->Next();
+        auto [id2, dist2] = iter2->Next();
+        count++;
+        if (id1 != id2 || dist1 != dist2) {
+            return false;
+        }
+    }
+    printf("Total number of iterator->Next() calls: %ld\n", count);
+    REQUIRE(!iter2->HasNext());
+    return true;
 }
 
 struct FileIOWriter {
@@ -245,9 +264,10 @@ index_support_int8(const knowhere::Json& conf) {
 //
 template <typename T>
 std::string
-test_emb_list_hnsw(const knowhere::DataSetPtr& default_ds_ptr, const knowhere::DataSetPtr& query_ds_ptr,
-                   const knowhere::DataSetPtr& golden_result, const std::vector<int32_t>& index_params,
-                   const knowhere::Json& conf, const bool mv_only_enable, const knowhere::BitsetView bitset_view) {
+test_emb_list_index(const knowhere::DataSetPtr& default_ds_ptr, const knowhere::DataSetPtr& query_ds_ptr,
+                    const knowhere::DataSetPtr& golden_result, const std::vector<int32_t>& index_params,
+                    const knowhere::Json& conf, const bool mv_only_enable, const knowhere::BitsetView bitset_view,
+                    const bool load_index_only = false) {
     const std::string index_type = conf[knowhere::meta::INDEX_TYPE].get<std::string>();
 
     // load indices
@@ -267,7 +287,8 @@ test_emb_list_hnsw(const knowhere::DataSetPtr& default_ds_ptr, const knowhere::D
     auto query_t_ds_ptr = knowhere::ConvertToDataTypeIfNeeded<T>(query_ds_ptr);
 
     StopWatch sw_search;
-    auto result = index.Search(query_t_ds_ptr, conf, bitset_view);
+    auto result = load_index_only ? index_loaded.Search(query_t_ds_ptr, conf, bitset_view)
+                                  : index.Search(query_t_ds_ptr, conf, bitset_view);
     double search_elapsed = sw_search.elapsed();
     printf("search cost: %f\n", search_elapsed);
 
@@ -287,7 +308,7 @@ test_emb_list_hnsw(const knowhere::DataSetPtr& default_ds_ptr, const knowhere::D
 
 }  // namespace
 
-TEST_CASE("Search for EMBList HNSW Indices", "Benchmark and validation") {
+TEST_CASE("Search for EMBList Indices (Float)", "Benchmark and validation on float vectors") {
     // various constants and restrictions
 
     // metrics to test
@@ -337,8 +358,10 @@ TEST_CASE("Search for EMBList HNSW Indices", "Benchmark and validation") {
     default_conf[knowhere::indexparam::EF] = 64;
     default_conf[knowhere::meta::TOPK] = TOPK;
     default_conf[knowhere::indexparam::RETRIEVAL_ANN_RATIO] = 3.0f;
+    default_conf[knowhere::indexparam::NLIST] = 6;
+    default_conf[knowhere::indexparam::NPROBE] = 4;
 
-    SECTION("FLAT") {
+    SECTION("HNSW FLAT") {
         const std::string& index_type = knowhere::IndexEnum::INDEX_HNSW;
 
         for (size_t distance_type = 0; distance_type < DISTANCE_TYPES.size(); distance_type++) {
@@ -405,8 +428,8 @@ TEST_CASE("Search for EMBList HNSW Indices", "Benchmark and validation") {
                                 DISTANCE_TYPES[distance_type].c_str(), dim, nb, int(bitset_rate * 100));
 
                             index_file =
-                                test_emb_list_hnsw<knowhere::fp32>(default_ds_ptr, query_ds_ptr, golden_result.value(),
-                                                                   params, conf, mv_only_enable, bitset_view);
+                                test_emb_list_index<knowhere::fp32>(default_ds_ptr, query_ds_ptr, golden_result.value(),
+                                                                    params, conf, mv_only_enable, bitset_view);
                             index_files.emplace_back(index_file);
 
                             // fp16 candidate
@@ -417,8 +440,8 @@ TEST_CASE("Search for EMBList HNSW Indices", "Benchmark and validation") {
                                 DISTANCE_TYPES[distance_type].c_str(), dim, nb, int(bitset_rate * 100));
 
                             index_file =
-                                test_emb_list_hnsw<knowhere::fp16>(default_ds_ptr, query_ds_ptr, golden_result.value(),
-                                                                   params, conf, mv_only_enable, bitset_view);
+                                test_emb_list_index<knowhere::fp16>(default_ds_ptr, query_ds_ptr, golden_result.value(),
+                                                                    params, conf, mv_only_enable, bitset_view);
                             index_files.emplace_back(index_file);
 
                             // bf16 candidate
@@ -429,8 +452,8 @@ TEST_CASE("Search for EMBList HNSW Indices", "Benchmark and validation") {
                                 DISTANCE_TYPES[distance_type].c_str(), dim, nb, int(bitset_rate * 100));
 
                             index_file =
-                                test_emb_list_hnsw<knowhere::bf16>(default_ds_ptr, query_ds_ptr, golden_result.value(),
-                                                                   params, conf, mv_only_enable, bitset_view);
+                                test_emb_list_index<knowhere::bf16>(default_ds_ptr, query_ds_ptr, golden_result.value(),
+                                                                    params, conf, mv_only_enable, bitset_view);
                             index_files.emplace_back(index_file);
 
                             if (index_support_int8(conf)) {
@@ -442,9 +465,9 @@ TEST_CASE("Search for EMBList HNSW Indices", "Benchmark and validation") {
                                     "out\n",
                                     DISTANCE_TYPES[distance_type].c_str(), dim, nb, int(bitset_rate * 100));
 
-                                index_file = test_emb_list_hnsw<knowhere::int8>(default_ds_ptr, query_ds_ptr,
-                                                                                golden_result.value(), params, conf,
-                                                                                mv_only_enable, bitset_view);
+                                index_file = test_emb_list_index<knowhere::int8>(default_ds_ptr, query_ds_ptr,
+                                                                                 golden_result.value(), params, conf,
+                                                                                 mv_only_enable, bitset_view);
                                 index_files.emplace_back(index_file);
                             }
                             std::remove(get_index_name<knowhere::fp32>(ann_test_name_, index_type, params).c_str());
@@ -463,7 +486,134 @@ TEST_CASE("Search for EMBList HNSW Indices", "Benchmark and validation") {
         }
     }
 
-    SECTION("SQ") {
+#ifdef KNOWHERE_WITH_CARDINAL
+    SECTION("CARDINAL_TIERED") {
+        static const int64_t mb = 1024 * 1024;
+        milvus::cachinglayer::Manager::ConfigureTieredStorage(
+            {CacheWarmupPolicy::CacheWarmupPolicy_Disable, CacheWarmupPolicy::CacheWarmupPolicy_Disable,
+             CacheWarmupPolicy::CacheWarmupPolicy_Disable, CacheWarmupPolicy::CacheWarmupPolicy_Disable},
+            {1024 * mb, 1024 * mb, 1024 * mb, 1024 * mb, 1024 * mb, 1024 * mb}, true, true, {10, false, 30});
+        const std::string& index_type = knowhere::IndexEnum::INDEX_CARDINAL_TIERED;
+
+        for (size_t distance_type = 0; distance_type < DISTANCE_TYPES.size(); distance_type++) {
+            for (const int32_t dim : DIMS) {
+                // generate a query
+                const uint64_t query_rng_seed = get_params_hash({(int)distance_type, dim});
+                auto query_ds_ptr = GenQueryEmbListDataSet(NQ, dim, query_rng_seed);
+
+                for (const int32_t nb : NBS) {
+                    knowhere::Json conf = default_conf;
+                    conf[knowhere::meta::METRIC_TYPE] = DISTANCE_TYPES[distance_type];
+                    conf[knowhere::meta::DIM] = dim;
+                    conf[knowhere::meta::ROWS] = nb;
+                    conf[knowhere::meta::INDEX_TYPE] = index_type;
+
+                    std::vector<int32_t> params = {(int)distance_type, dim, nb};
+
+                    // generate a default dataset
+                    const uint64_t rng_seed = get_params_hash(params);
+                    // vector_id -> emb_list_id
+                    // [0...9] -> 0, [10...19] -> 1, [20...29] -> 2, ...
+                    int each_el_len = 10;
+                    int num_el = int(nb / each_el_len) + 1;
+                    auto default_ds_ptr = GenEmbListDataSet(nb, dim, rng_seed, each_el_len);
+                    // emb_list_id -> partition_id
+                    // [0, 3, 6, ...] -> 0, [1, 4, 7, ...] -> 1, [2, 5, 8, ...] -> 2, ...
+                    int partition_num = 3;
+                    printf("num_el: %d, each_el_len: %d, partition_num: %d\n", num_el, each_el_len, partition_num);
+                    std::unordered_map<int64_t, std::vector<std::vector<uint32_t>>> scalar_info =
+                        GenerateScalarInfoWithStep(nb, partition_num, each_el_len);
+
+                    for (const bool mv_only_enable : MV_ONLYs) {
+                        printf("with mv only enabled : %d\n", mv_only_enable);
+                        if (mv_only_enable) {
+                            // continue;
+                            default_ds_ptr->Set(knowhere::meta::SCALAR_INFO, scalar_info);
+                        }
+
+                        std::vector<std::string> index_files;
+                        std::string index_file;
+
+                        // test various bitset rates
+                        for (const float bitset_rate : BITSET_RATES) {
+                            printf("bitset_rate: %f\n", bitset_rate);
+                            const std::vector<uint8_t> bitset_data = GenerateBitsetByPartition(
+                                num_el, 1.0f - bitset_rate, mv_only_enable ? partition_num : 1);
+
+                            // initialize bitset_view.
+                            // provide a default one if nbits_set == 0
+                            knowhere::BitsetView bitset_view = nullptr;
+                            if (bitset_rate != 0.0f || mv_only_enable) {
+                                bitset_view = knowhere::BitsetView(bitset_data.data(), num_el);
+                            }
+
+                            // get a golden result
+                            auto golden_result = knowhere::BruteForce::Search<knowhere::fp32>(
+                                default_ds_ptr, query_ds_ptr, conf, bitset_view);
+
+                            // fp32 candidate
+                            printf(
+                                "\nProcessing EMBList CARDINAL_TIERED fp32 for %s distance, dim=%d, nrows=%d, %d%% "
+                                "points filtered out\n",
+                                DISTANCE_TYPES[distance_type].c_str(), dim, nb, int(bitset_rate * 100));
+
+                            index_file =
+                                test_emb_list_index<knowhere::fp32>(default_ds_ptr, query_ds_ptr, golden_result.value(),
+                                                                    params, conf, mv_only_enable, bitset_view, true);
+                            index_files.emplace_back(index_file);
+
+                            // fp16 candidate
+                            printf(
+                                "\nProcessing EMBList CARDINAL_TIERED fp16 for %s distance, dim=%d, nrows=%d, %d%% "
+                                "points filtered out\n",
+                                DISTANCE_TYPES[distance_type].c_str(), dim, nb, int(bitset_rate * 100));
+
+                            index_file =
+                                test_emb_list_index<knowhere::fp16>(default_ds_ptr, query_ds_ptr, golden_result.value(),
+                                                                    params, conf, mv_only_enable, bitset_view, true);
+                            index_files.emplace_back(index_file);
+
+                            // bf16 candidate
+                            printf(
+                                "\nProcessing EMBList CARDINAL_TIERED bf16 for %s distance, dim=%d, nrows=%d, %d%% "
+                                "points filtered out\n",
+                                DISTANCE_TYPES[distance_type].c_str(), dim, nb, int(bitset_rate * 100));
+
+                            index_file =
+                                test_emb_list_index<knowhere::bf16>(default_ds_ptr, query_ds_ptr, golden_result.value(),
+                                                                    params, conf, mv_only_enable, bitset_view, true);
+                            index_files.emplace_back(index_file);
+
+                            if (!index_support_int8(conf)) {
+                                // int8 candidate
+                                printf(
+                                    "\nProcessing EMBList CARDINAL_TIERED int8 for %s distance, dim=%d, nrows=%d, %d%% "
+                                    "points filtered out\n",
+                                    DISTANCE_TYPES[distance_type].c_str(), dim, nb, int(bitset_rate * 100));
+
+                                index_file = test_emb_list_index<knowhere::int8>(default_ds_ptr, query_ds_ptr,
+                                                                                 golden_result.value(), params, conf,
+                                                                                 mv_only_enable, bitset_view);
+                                index_files.emplace_back(index_file);
+                            }
+                            std::remove(get_index_name<knowhere::fp32>(ann_test_name_, index_type, params).c_str());
+                            std::remove(get_index_name<knowhere::fp16>(ann_test_name_, index_type, params).c_str());
+                            std::remove(get_index_name<knowhere::bf16>(ann_test_name_, index_type, params).c_str());
+                            if (index_support_int8(conf)) {
+                                std::remove(get_index_name<knowhere::int8>(ann_test_name_, index_type, params).c_str());
+                            }
+                        }
+                        for (auto index : index_files) {
+                            std::remove(index.c_str());
+                        }
+                    }
+                }
+            }
+        }
+    }
+#endif
+
+    SECTION("HNSW SQ") {
         const std::string& index_type = knowhere::IndexEnum::INDEX_HNSW_SQ;
 
         for (size_t distance_type = 0; distance_type < DISTANCE_TYPES.size(); distance_type++) {
@@ -544,9 +694,9 @@ TEST_CASE("Search for EMBList HNSW Indices", "Benchmark and validation") {
                                     sq_type.c_str(), DISTANCE_TYPES[distance_type].c_str(), dim, nb,
                                     int(bitset_rate * 100));
 
-                                index_file = test_emb_list_hnsw<knowhere::fp32>(default_ds_ptr, query_ds_ptr,
-                                                                                golden_result.value(), params, conf,
-                                                                                mv_only_enable, bitset_view);
+                                index_file = test_emb_list_index<knowhere::fp32>(default_ds_ptr, query_ds_ptr,
+                                                                                 golden_result.value(), params, conf,
+                                                                                 mv_only_enable, bitset_view);
                                 index_files.emplace_back(index_file);
 
                                 // fp16 candidate
@@ -558,9 +708,9 @@ TEST_CASE("Search for EMBList HNSW Indices", "Benchmark and validation") {
                                     sq_type.c_str(), DISTANCE_TYPES[distance_type].c_str(), dim, nb,
                                     int(bitset_rate * 100));
 
-                                index_file = test_emb_list_hnsw<knowhere::fp16>(default_ds_ptr, query_ds_ptr,
-                                                                                golden_result.value(), params, conf,
-                                                                                mv_only_enable, bitset_view);
+                                index_file = test_emb_list_index<knowhere::fp16>(default_ds_ptr, query_ds_ptr,
+                                                                                 golden_result.value(), params, conf,
+                                                                                 mv_only_enable, bitset_view);
                                 index_files.emplace_back(index_file);
 
                                 // bf16 candidate
@@ -572,9 +722,9 @@ TEST_CASE("Search for EMBList HNSW Indices", "Benchmark and validation") {
                                     sq_type.c_str(), DISTANCE_TYPES[distance_type].c_str(), dim, nb,
                                     int(bitset_rate * 100));
 
-                                index_file = test_emb_list_hnsw<knowhere::bf16>(default_ds_ptr, query_ds_ptr,
-                                                                                golden_result.value(), params, conf,
-                                                                                mv_only_enable, bitset_view);
+                                index_file = test_emb_list_index<knowhere::bf16>(default_ds_ptr, query_ds_ptr,
+                                                                                 golden_result.value(), params, conf,
+                                                                                 mv_only_enable, bitset_view);
                                 index_files.emplace_back(index_file);
 
                                 if (index_support_int8(conf)) {
@@ -587,9 +737,9 @@ TEST_CASE("Search for EMBList HNSW Indices", "Benchmark and validation") {
                                         sq_type.c_str(), DISTANCE_TYPES[distance_type].c_str(), dim, nb,
                                         int(bitset_rate * 100));
 
-                                    index_file = test_emb_list_hnsw<knowhere::int8>(default_ds_ptr, query_ds_ptr,
-                                                                                    golden_result.value(), params, conf,
-                                                                                    mv_only_enable, bitset_view);
+                                    index_file = test_emb_list_index<knowhere::int8>(default_ds_ptr, query_ds_ptr,
+                                                                                     golden_result.value(), params,
+                                                                                     conf, mv_only_enable, bitset_view);
                                     index_files.emplace_back(index_file);
                                 }
 
@@ -615,7 +765,7 @@ TEST_CASE("Search for EMBList HNSW Indices", "Benchmark and validation") {
                                             sq_type.c_str(), allowed_ref.c_str(), DISTANCE_TYPES[distance_type].c_str(),
                                             dim, nb, int(bitset_rate * 100));
 
-                                        index_file = test_emb_list_hnsw<knowhere::fp32>(
+                                        index_file = test_emb_list_index<knowhere::fp32>(
                                             default_ds_ptr, query_ds_ptr, golden_result.value(), params_refine,
                                             conf_refine, mv_only_enable, bitset_view);
                                         index_files.emplace_back(index_file);
@@ -644,7 +794,7 @@ TEST_CASE("Search for EMBList HNSW Indices", "Benchmark and validation") {
                                             sq_type.c_str(), allowed_ref.c_str(), DISTANCE_TYPES[distance_type].c_str(),
                                             dim, nb, int(bitset_rate * 100));
 
-                                        index_file = test_emb_list_hnsw<knowhere::fp16>(
+                                        index_file = test_emb_list_index<knowhere::fp16>(
                                             default_ds_ptr, query_ds_ptr, golden_result.value(), params_refine,
                                             conf_refine, mv_only_enable, bitset_view);
                                         index_files.emplace_back(index_file);
@@ -673,7 +823,7 @@ TEST_CASE("Search for EMBList HNSW Indices", "Benchmark and validation") {
                                             sq_type.c_str(), allowed_ref.c_str(), DISTANCE_TYPES[distance_type].c_str(),
                                             dim, nb, int(bitset_rate * 100));
 
-                                        index_file = test_emb_list_hnsw<knowhere::bf16>(
+                                        index_file = test_emb_list_index<knowhere::bf16>(
                                             default_ds_ptr, query_ds_ptr, golden_result.value(), params_refine,
                                             conf_refine, mv_only_enable, bitset_view);
                                         index_files.emplace_back(index_file);
@@ -691,7 +841,7 @@ TEST_CASE("Search for EMBList HNSW Indices", "Benchmark and validation") {
         }
     }
 
-    SECTION("PQ") {
+    SECTION("HNSW PQ") {
         const std::string& index_type = knowhere::IndexEnum::INDEX_HNSW_PQ;
 
         for (size_t distance_type = 0; distance_type < DISTANCE_TYPES.size(); distance_type++) {
@@ -773,9 +923,9 @@ TEST_CASE("Search for EMBList HNSW Indices", "Benchmark and validation") {
                                     pq_m, NBITS[nbits_type], DISTANCE_TYPES[distance_type].c_str(), dim, nb,
                                     int(bitset_rate * 100));
 
-                                index_file = test_emb_list_hnsw<knowhere::fp32>(default_ds_ptr, query_ds_ptr,
-                                                                                golden_result.value(), params, conf,
-                                                                                mv_only_enable, bitset_view);
+                                index_file = test_emb_list_index<knowhere::fp32>(default_ds_ptr, query_ds_ptr,
+                                                                                 golden_result.value(), params, conf,
+                                                                                 mv_only_enable, bitset_view);
                                 index_files.emplace_back(index_file);
 
                                 // fp16 candidate
@@ -787,9 +937,9 @@ TEST_CASE("Search for EMBList HNSW Indices", "Benchmark and validation") {
                                     pq_m, NBITS[nbits_type], DISTANCE_TYPES[distance_type].c_str(), dim, nb,
                                     int(bitset_rate * 100));
 
-                                index_file = test_emb_list_hnsw<knowhere::fp16>(default_ds_ptr, query_ds_ptr,
-                                                                                golden_result.value(), params, conf,
-                                                                                mv_only_enable, bitset_view);
+                                index_file = test_emb_list_index<knowhere::fp16>(default_ds_ptr, query_ds_ptr,
+                                                                                 golden_result.value(), params, conf,
+                                                                                 mv_only_enable, bitset_view);
                                 index_files.emplace_back(index_file);
 
                                 // bf16 candidate
@@ -801,9 +951,9 @@ TEST_CASE("Search for EMBList HNSW Indices", "Benchmark and validation") {
                                     pq_m, NBITS[nbits_type], DISTANCE_TYPES[distance_type].c_str(), dim, nb,
                                     int(bitset_rate * 100));
 
-                                index_file = test_emb_list_hnsw<knowhere::bf16>(default_ds_ptr, query_ds_ptr,
-                                                                                golden_result.value(), params, conf,
-                                                                                mv_only_enable, bitset_view);
+                                index_file = test_emb_list_index<knowhere::bf16>(default_ds_ptr, query_ds_ptr,
+                                                                                 golden_result.value(), params, conf,
+                                                                                 mv_only_enable, bitset_view);
                                 index_files.emplace_back(index_file);
 
                                 if (index_support_int8(conf)) {
@@ -817,9 +967,9 @@ TEST_CASE("Search for EMBList HNSW Indices", "Benchmark and validation") {
                                         pq_m, NBITS[nbits_type], DISTANCE_TYPES[distance_type].c_str(), dim, nb,
                                         int(bitset_rate * 100));
 
-                                    index_file = test_emb_list_hnsw<knowhere::int8>(default_ds_ptr, query_ds_ptr,
-                                                                                    golden_result.value(), params, conf,
-                                                                                    mv_only_enable, bitset_view);
+                                    index_file = test_emb_list_index<knowhere::int8>(default_ds_ptr, query_ds_ptr,
+                                                                                     golden_result.value(), params,
+                                                                                     conf, mv_only_enable, bitset_view);
                                     index_files.emplace_back(index_file);
                                 }
 
@@ -843,7 +993,7 @@ TEST_CASE("Search for EMBList HNSW Indices", "Benchmark and validation") {
                                         pq_m, NBITS[nbits_type], allowed_ref.c_str(),
                                         DISTANCE_TYPES[distance_type].c_str(), dim, nb, int(bitset_rate * 100));
 
-                                    index_file = test_emb_list_hnsw<knowhere::fp32>(
+                                    index_file = test_emb_list_index<knowhere::fp32>(
                                         default_ds_ptr, query_ds_ptr, golden_result.value(), params_refine, conf_refine,
                                         mv_only_enable, bitset_view);
                                     index_files.emplace_back(index_file);
@@ -869,7 +1019,7 @@ TEST_CASE("Search for EMBList HNSW Indices", "Benchmark and validation") {
                                         pq_m, NBITS[nbits_type], allowed_ref.c_str(),
                                         DISTANCE_TYPES[distance_type].c_str(), dim, nb, int(bitset_rate * 100));
 
-                                    index_file = test_emb_list_hnsw<knowhere::fp16>(
+                                    index_file = test_emb_list_index<knowhere::fp16>(
                                         default_ds_ptr, query_ds_ptr, golden_result.value(), params_refine, conf_refine,
                                         mv_only_enable, bitset_view);
                                     index_files.emplace_back(index_file);
@@ -895,7 +1045,7 @@ TEST_CASE("Search for EMBList HNSW Indices", "Benchmark and validation") {
                                         pq_m, NBITS[nbits_type], allowed_ref.c_str(),
                                         DISTANCE_TYPES[distance_type].c_str(), dim, nb, int(bitset_rate * 100));
 
-                                    index_file = test_emb_list_hnsw<knowhere::bf16>(
+                                    index_file = test_emb_list_index<knowhere::bf16>(
                                         default_ds_ptr, query_ds_ptr, golden_result.value(), params_refine, conf_refine,
                                         mv_only_enable, bitset_view);
                                     index_files.emplace_back(index_file);
@@ -912,7 +1062,7 @@ TEST_CASE("Search for EMBList HNSW Indices", "Benchmark and validation") {
         }
     }
 
-    SECTION("PRQ") {
+    SECTION("HNSW PRQ") {
         const std::string& index_type = knowhere::IndexEnum::INDEX_HNSW_PRQ;
 
         for (size_t distance_type = 0; distance_type < DISTANCE_TYPES.size(); distance_type++) {
@@ -998,9 +1148,9 @@ TEST_CASE("Search for EMBList HNSW Indices", "Benchmark and validation") {
                                     prq_num, prq_m, NBITS[nbits_type], DISTANCE_TYPES[distance_type].c_str(), dim, nb,
                                     int(bitset_rate * 100));
 
-                                index_file = test_emb_list_hnsw<knowhere::fp32>(default_ds_ptr, query_ds_ptr,
-                                                                                golden_result.value(), params, conf,
-                                                                                mv_only_enable, bitset_view);
+                                index_file = test_emb_list_index<knowhere::fp32>(default_ds_ptr, query_ds_ptr,
+                                                                                 golden_result.value(), params, conf,
+                                                                                 mv_only_enable, bitset_view);
                                 index_files.emplace_back(index_file);
 
                                 // fp16 candidate
@@ -1013,9 +1163,9 @@ TEST_CASE("Search for EMBList HNSW Indices", "Benchmark and validation") {
                                     prq_num, prq_m, NBITS[nbits_type], DISTANCE_TYPES[distance_type].c_str(), dim, nb,
                                     int(bitset_rate * 100));
 
-                                index_file = test_emb_list_hnsw<knowhere::fp16>(default_ds_ptr, query_ds_ptr,
-                                                                                golden_result.value(), params, conf,
-                                                                                mv_only_enable, bitset_view);
+                                index_file = test_emb_list_index<knowhere::fp16>(default_ds_ptr, query_ds_ptr,
+                                                                                 golden_result.value(), params, conf,
+                                                                                 mv_only_enable, bitset_view);
                                 index_files.emplace_back(index_file);
 
                                 // bf16 candidate
@@ -1028,9 +1178,9 @@ TEST_CASE("Search for EMBList HNSW Indices", "Benchmark and validation") {
                                     prq_num, prq_m, NBITS[nbits_type], DISTANCE_TYPES[distance_type].c_str(), dim, nb,
                                     int(bitset_rate * 100));
 
-                                index_file = test_emb_list_hnsw<knowhere::bf16>(default_ds_ptr, query_ds_ptr,
-                                                                                golden_result.value(), params, conf,
-                                                                                mv_only_enable, bitset_view);
+                                index_file = test_emb_list_index<knowhere::bf16>(default_ds_ptr, query_ds_ptr,
+                                                                                 golden_result.value(), params, conf,
+                                                                                 mv_only_enable, bitset_view);
                                 index_files.emplace_back(index_file);
 
                                 if (index_support_int8(conf)) {
@@ -1044,9 +1194,9 @@ TEST_CASE("Search for EMBList HNSW Indices", "Benchmark and validation") {
                                         prq_num, prq_m, NBITS[nbits_type], DISTANCE_TYPES[distance_type].c_str(), dim,
                                         nb, int(bitset_rate * 100));
 
-                                    index_file = test_emb_list_hnsw<knowhere::int8>(default_ds_ptr, query_ds_ptr,
-                                                                                    golden_result.value(), params, conf,
-                                                                                    mv_only_enable, bitset_view);
+                                    index_file = test_emb_list_index<knowhere::int8>(default_ds_ptr, query_ds_ptr,
+                                                                                     golden_result.value(), params,
+                                                                                     conf, mv_only_enable, bitset_view);
                                     index_files.emplace_back(index_file);
                                 }
 
@@ -1071,7 +1221,7 @@ TEST_CASE("Search for EMBList HNSW Indices", "Benchmark and validation") {
                                         prq_num, prq_m, NBITS[nbits_type], allowed_ref.c_str(),
                                         DISTANCE_TYPES[distance_type].c_str(), dim, nb, int(bitset_rate * 100));
 
-                                    index_file = test_emb_list_hnsw<knowhere::fp32>(
+                                    index_file = test_emb_list_index<knowhere::fp32>(
                                         default_ds_ptr, query_ds_ptr, golden_result.value(), params_refine, conf_refine,
                                         mv_only_enable, bitset_view);
                                     index_files.emplace_back(index_file);
@@ -1098,7 +1248,7 @@ TEST_CASE("Search for EMBList HNSW Indices", "Benchmark and validation") {
                                         prq_num, prq_m, NBITS[nbits_type], allowed_ref.c_str(),
                                         DISTANCE_TYPES[distance_type].c_str(), dim, nb, int(bitset_rate * 100));
 
-                                    index_file = test_emb_list_hnsw<knowhere::fp16>(
+                                    index_file = test_emb_list_index<knowhere::fp16>(
                                         default_ds_ptr, query_ds_ptr, golden_result.value(), params_refine, conf_refine,
                                         mv_only_enable, bitset_view);
                                     index_files.emplace_back(index_file);
@@ -1125,7 +1275,7 @@ TEST_CASE("Search for EMBList HNSW Indices", "Benchmark and validation") {
                                         prq_num, prq_m, NBITS[nbits_type], allowed_ref.c_str(),
                                         DISTANCE_TYPES[distance_type].c_str(), dim, nb, int(bitset_rate * 100));
 
-                                    index_file = test_emb_list_hnsw<knowhere::bf16>(
+                                    index_file = test_emb_list_index<knowhere::bf16>(
                                         default_ds_ptr, query_ds_ptr, golden_result.value(), params_refine, conf_refine,
                                         mv_only_enable, bitset_view);
                                     index_files.emplace_back(index_file);
@@ -1141,9 +1291,67 @@ TEST_CASE("Search for EMBList HNSW Indices", "Benchmark and validation") {
             }
         }
     }
+
+    SECTION("IVFFLAT") {
+        const std::string& index_type = knowhere::IndexEnum::INDEX_FAISS_IVFFLAT;
+        // ivfflat emb list search need direct_map, which only generate when deserializing index.
+        bool test_load_index_only = true;
+
+        for (size_t distance_type = 0; distance_type < DISTANCE_TYPES.size(); distance_type++) {
+            for (const int32_t dim : DIMS) {
+                // generate query dataset
+                const uint64_t query_rng_seed = get_params_hash({(int)distance_type, dim});
+                auto query_ds_ptr = GenQueryEmbListDataSet(NQ, dim, query_rng_seed);
+
+                for (const int32_t nb : NBS) {
+                    knowhere::Json conf = default_conf;
+                    conf[knowhere::meta::METRIC_TYPE] = DISTANCE_TYPES[distance_type];
+                    conf[knowhere::meta::DIM] = dim;
+                    conf[knowhere::meta::ROWS] = nb;
+                    conf[knowhere::meta::INDEX_TYPE] = index_type;
+
+                    std::vector<int32_t> params = {(int)distance_type, dim, nb};
+
+                    // generate a default dataset
+                    const uint64_t rng_seed = get_params_hash(params);
+                    int each_el_len = 10;
+                    int num_el = int(nb / each_el_len) + 1;
+                    auto default_ds_ptr = GenEmbListDataSet(nb, dim, rng_seed, each_el_len);
+
+                    std::vector<std::string> index_files;
+                    std::string index_file;
+
+                    for (const float bitset_rate : BITSET_RATES) {
+                        printf("bitset_rate: %f\n", bitset_rate);
+                        const std::vector<uint8_t> bitset_data =
+                            GenerateBitsetByPartition(num_el, 1.0f - bitset_rate, 1);
+                        knowhere::BitsetView bitset_view = nullptr;
+                        if (bitset_rate != 0.0f) {
+                            bitset_view = knowhere::BitsetView(bitset_data.data(), num_el);
+                        }
+                        auto golden_result = knowhere::BruteForce::Search<knowhere::fp32>(default_ds_ptr, query_ds_ptr,
+                                                                                          conf, bitset_view);
+                        // only test fp32
+                        printf(
+                            "Processing EMBList IVFFLAT fp32 for %s distance, dim=%d, nrows=%d, %d%% points filtered "
+                            "out\n",
+                            DISTANCE_TYPES[distance_type].c_str(), dim, nb, int(bitset_rate * 100));
+                        index_file =
+                            test_emb_list_index<knowhere::fp32>(default_ds_ptr, query_ds_ptr, golden_result.value(),
+                                                                params, conf, false, bitset_view, test_load_index_only);
+                        index_files.emplace_back(index_file);
+                    }
+
+                    for (auto index : index_files) {
+                        std::remove(index.c_str());
+                    }
+                }
+            }
+        }
+    }
 }
 
-TEST_CASE("Search for EMBList HNSW (Binary)", "Benchmark and validation on binary vectors") {
+TEST_CASE("Search for EMBList Indices (Binary)", "Benchmark and validation on binary vectors") {
     const std::vector<std::string> DISTANCE_TYPES = {"MAX_SIM_HAMMING", "MAX_SIM_JACCARD"};
 
     const std::vector<int32_t> DIMS = {32};
@@ -1170,7 +1378,7 @@ TEST_CASE("Search for EMBList HNSW (Binary)", "Benchmark and validation on binar
     // [0, 3, 6, ...] -> 0; [1, 4, 7, ...] -> 1; [2, 5, 8, ...] -> 2
     int partition_num = 3;
 
-    SECTION("FLAT") {
+    SECTION("HNSW FLAT") {
         const std::string& index_type = knowhere::IndexEnum::INDEX_HNSW;
 
         for (size_t distance_type = 0; distance_type < DISTANCE_TYPES.size(); distance_type++) {
@@ -1226,9 +1434,718 @@ TEST_CASE("Search for EMBList HNSW (Binary)", "Benchmark and validation on binar
                                 DISTANCE_TYPES[distance_type].c_str(), dim, nb, int(bitset_rate * 100));
 
                             auto index_file =
-                                test_emb_list_hnsw<knowhere::bin1>(default_ds_ptr, query_ds_ptr, golden_result.value(),
-                                                                   params, conf, mv_only_enable, bitset_view);
+                                test_emb_list_index<knowhere::bin1>(default_ds_ptr, query_ds_ptr, golden_result.value(),
+                                                                    params, conf, mv_only_enable, bitset_view);
                             std::remove(index_file.c_str());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+#ifdef KNOWHERE_WITH_CARDINAL
+    SECTION("CARDINAL_TIERED") {
+        static const int64_t mb = 1024 * 1024;
+        milvus::cachinglayer::Manager::ConfigureTieredStorage(
+            {CacheWarmupPolicy::CacheWarmupPolicy_Disable, CacheWarmupPolicy::CacheWarmupPolicy_Disable,
+             CacheWarmupPolicy::CacheWarmupPolicy_Disable, CacheWarmupPolicy::CacheWarmupPolicy_Disable},
+            {1024 * mb, 1024 * mb, 1024 * mb, 1024 * mb, 1024 * mb, 1024 * mb}, true, true, {10, false, 30});
+        const std::string& index_type = knowhere::IndexEnum::INDEX_CARDINAL_TIERED;
+
+        for (size_t distance_type = 0; distance_type < DISTANCE_TYPES.size(); distance_type++) {
+            for (const int32_t dim : DIMS) {
+                // generate query dataset
+                const uint64_t query_rng_seed = get_params_hash({(int)distance_type, dim});
+                auto query_ds_ptr = GenQueryEmbListBinDataSet(NQ, dim, query_rng_seed);
+
+                for (const int32_t nb : NBS) {
+                    // generate base dataset
+                    std::vector<int32_t> params = {(int)distance_type, dim, nb};
+                    const uint64_t rng_seed = get_params_hash(params);
+                    int num_el = int(nb / each_el_len) + 1;
+                    auto default_ds_ptr = GenEmbListBinDataSet(nb, dim, rng_seed, each_el_len);
+
+                    knowhere::Json conf = default_conf;
+                    conf[knowhere::meta::INDEX_TYPE] = index_type;
+                    conf[knowhere::meta::METRIC_TYPE] = DISTANCE_TYPES[distance_type];
+                    conf[knowhere::meta::DIM] = dim;
+                    conf[knowhere::meta::ROWS] = nb;
+                    printf("conf: %s\n", conf.dump().c_str());
+
+                    std::unordered_map<int64_t, std::vector<std::vector<uint32_t>>> scalar_info =
+                        GenerateScalarInfoWithStep(nb, partition_num, each_el_len);
+
+                    for (const bool mv_only_enable : MV_ONLYs) {
+                        printf("mv_only_enable: %d\n", mv_only_enable);
+                        if (mv_only_enable) {
+                            default_ds_ptr->Set(knowhere::meta::SCALAR_INFO, scalar_info);
+                        }
+
+                        // test various bitset rates
+                        for (const float bitset_rate : BITSET_RATES) {
+                            printf("bitset_rate: %f\n", bitset_rate);
+                            const std::vector<uint8_t> bitset_data = GenerateBitsetByPartition(
+                                num_el, 1.0f - bitset_rate, mv_only_enable ? partition_num : 1);
+
+                            // initialize bitset_view.
+                            // provide a default one if nbits_set == 0
+                            knowhere::BitsetView bitset_view = nullptr;
+                            if (bitset_rate != 0.0f || mv_only_enable) {
+                                bitset_view = knowhere::BitsetView(bitset_data.data(), num_el);
+                            }
+
+                            // get a golden result
+                            auto golden_result = knowhere::BruteForce::Search<knowhere::bin1>(
+                                default_ds_ptr, query_ds_ptr, conf, bitset_view);
+
+                            printf(
+                                "\nProcessing EMBList CARDINAL_TIERED bin1 for %s distance, dim=%d, nrows=%d, %d%% "
+                                "points filtered out\n",
+                                DISTANCE_TYPES[distance_type].c_str(), dim, nb, int(bitset_rate * 100));
+
+                            auto index_file =
+                                test_emb_list_index<knowhere::bin1>(default_ds_ptr, query_ds_ptr, golden_result.value(),
+                                                                    params, conf, mv_only_enable, bitset_view, true);
+                            std::remove(index_file.c_str());
+                        }
+                    }
+                }
+            }
+        }
+    }
+#endif
+}
+
+TEST_CASE("Test with some empty emb list", "[empty_emb_list]") {
+    // metrics to test
+    const std::vector<std::string> DISTANCE_TYPES = {"MAX_SIM_IP", "MAX_SIM_L2", "MAX_SIM_COSINE"};
+
+    // for unit tests
+    const std::vector<int32_t> DIMS = {4};
+    const std::vector<int32_t> NBS = {256};
+    const int32_t NQ = 10;
+    const int32_t TOPK = 16;
+
+    // random bitset rates
+    // 0.0 means unfiltered, 1.0 means all filtered out
+    const std::vector<float> BITSET_RATES = {0.0f, 0.5f, 0.95f, 1.0f};
+
+    // create base json config
+    knowhere::Json default_conf;
+
+    default_conf[knowhere::indexparam::HNSW_M] = 16;
+    default_conf[knowhere::indexparam::EFCONSTRUCTION] = 96;
+    default_conf[knowhere::indexparam::EF] = 64;
+    default_conf[knowhere::meta::TOPK] = TOPK;
+    default_conf[knowhere::indexparam::RETRIEVAL_ANN_RATIO] = 3.0f;
+    default_conf[knowhere::indexparam::NLIST] = 6;
+    default_conf[knowhere::indexparam::NPROBE] = 6;
+
+    int each_el_len = 10;
+
+    SECTION("HNSW FLAT") {
+        const std::string& index_type = knowhere::IndexEnum::INDEX_HNSW;
+
+        for (size_t distance_type = 0; distance_type < DISTANCE_TYPES.size(); distance_type++) {
+            for (const int32_t dim : DIMS) {
+                // generate query dataset
+                const uint64_t query_rng_seed = get_params_hash({(int)distance_type, dim});
+                auto query_ds_ptr = GenQueryEmbListDataSet(NQ, dim, query_rng_seed);
+
+                for (const int32_t nb : NBS) {
+                    knowhere::Json conf = default_conf;
+                    conf[knowhere::meta::METRIC_TYPE] = DISTANCE_TYPES[distance_type];
+                    conf[knowhere::meta::DIM] = dim;
+                    conf[knowhere::meta::ROWS] = nb;
+                    conf[knowhere::meta::INDEX_TYPE] = index_type;
+                    // generate base dataset
+                    std::vector<int32_t> params = {(int)distance_type, dim, nb};
+                    const uint64_t rng_seed = get_params_hash(params);
+                    int num_el = int(nb / each_el_len) + 1;
+                    auto default_ds_ptr = GenEmbListDataSetWithSomeEmpty(nb, dim, rng_seed, each_el_len);
+
+                    for (const float bitset_rate : BITSET_RATES) {
+                        printf("bitset_rate: %f\n", bitset_rate);
+                        const std::vector<uint8_t> bitset_data =
+                            GenerateBitsetByPartition(num_el, 1.0f - bitset_rate, 1);
+                        knowhere::BitsetView bitset_view = nullptr;
+                        if (bitset_rate != 0.0f) {
+                            bitset_view = knowhere::BitsetView(bitset_data.data(), num_el);
+                        }
+
+                        auto golden_result = knowhere::BruteForce::Search<knowhere::fp32>(default_ds_ptr, query_ds_ptr,
+                                                                                          conf, bitset_view);
+                        printf(
+                            "\nProcessing EMBList HNSW,Flat fp32 for %s distance, dim=%d, nrows=%d, %d%% points "
+                            "filtered "
+                            "out\n",
+                            DISTANCE_TYPES[distance_type].c_str(), dim, nb, int(bitset_rate * 100));
+                        auto index_file = test_emb_list_index<knowhere::fp32>(
+                            default_ds_ptr, query_ds_ptr, golden_result.value(), params, conf, false, bitset_view);
+                        std::remove(index_file.c_str());
+                    }
+                }
+            }
+        }
+    }
+}
+
+template <typename DataType>
+void
+EmbListAddTest(const knowhere::DataSetPtr train_ds_in, const knowhere::DataSetPtr query_ds,
+               const knowhere::MetricType metric, const knowhere::Json& conf, const size_t each_el_len) {
+    auto train_ds = knowhere::ConvertToDataTypeIfNeeded<DataType>(train_ds_in);
+    auto partition_num = 3;
+    auto train_ds_list = SplitEmbListDataSet<DataType>(train_ds, partition_num, each_el_len);
+    auto query = knowhere::ConvertToDataTypeIfNeeded<DataType>(query_ds);
+    auto version = knowhere::Version::GetCurrentVersion().VersionNumber();
+    auto rows = train_ds->GetRows();
+    auto num_el = (rows + each_el_len - 1) / each_el_len;
+
+    auto index = knowhere::IndexFactory::Instance().Create<DataType>(conf[knowhere::meta::INDEX_TYPE], version).value();
+    for (size_t i = 0; i < train_ds_list.size(); i++) {
+        auto& base = train_ds_list[i];
+        if (i == 0) {
+            REQUIRE(index.Build(base, conf, false) == knowhere::Status::success);
+        } else {
+            REQUIRE(index.Add(base, conf, false) == knowhere::Status::success);
+        }
+    }
+
+    auto knn_gt = knowhere::BruteForce::Search<DataType>(train_ds, query, conf, nullptr);
+
+    const auto bitset_percentages = {0.0f, 0.5f, 0.9f, 0.98f};
+    for (const float percentage : bitset_percentages) {
+        auto bitset_data = GenerateBitsetByPartition(num_el, 1 - percentage, 1);
+        knowhere::BitsetView bitset(bitset_data.data(), num_el);
+        auto knn_gt = knowhere::BruteForce::Search<DataType>(train_ds, query, conf, bitset);
+        auto res = index.Search(query, conf, bitset);
+        REQUIRE(res.has_value());
+        float recall = GetKNNRecall(*knn_gt.value(), *res.value());
+        printf("bitset_rate: %f, recall: %f\n", percentage, recall);
+        REQUIRE(recall > 0.75f);
+    }
+}
+
+TEST_CASE("Test growing with emb list", "[growing]") {
+    const std::vector<std::string> DISTANCE_TYPES = {"MAX_SIM_IP", "MAX_SIM_L2", "MAX_SIM_COSINE"};
+    const std::vector<int32_t> DIMS = {4};
+    const std::vector<int32_t> NBS = {1000};
+    const int32_t NQ = 10;
+    const int32_t TOPK = 16;
+    const int32_t each_el_len = 10;
+
+    uint64_t seed = 42;
+
+    SECTION("IVFFLAT_CC") {
+        for (size_t distance_type = 0; distance_type < DISTANCE_TYPES.size(); distance_type++) {
+            for (const int32_t dim : DIMS) {
+                for (const int32_t nb : NBS) {
+                    auto total_nb = nb * 2;
+                    auto train_ds = GenEmbListDataSet(total_nb, dim, seed, each_el_len);
+                    auto query_ds = GenQueryEmbListDataSet(NQ, dim, seed);
+                    knowhere::Json conf;
+                    conf[knowhere::meta::INDEX_TYPE] = knowhere::IndexEnum::INDEX_FAISS_IVFFLAT_CC;
+                    conf[knowhere::meta::METRIC_TYPE] = DISTANCE_TYPES[distance_type];
+                    conf[knowhere::meta::DIM] = dim;
+                    conf[knowhere::meta::TOPK] = TOPK;
+                    conf[knowhere::indexparam::NLIST] = 16;
+                    conf[knowhere::indexparam::NPROBE] = 12;
+
+                    EmbListAddTest<knowhere::fp32>(train_ds, query_ds, conf[knowhere::meta::METRIC_TYPE], conf,
+                                                   each_el_len);
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("Test brute force search on chunk", "[on_chunk]") {
+    const std::vector<int32_t> DIMS = {8};
+    const std::vector<int32_t> NBS = {1000};
+    const int32_t NQ = 10;
+    const int32_t TOPK = 16;
+    const int32_t each_el_len = 10;
+    const std::vector<float> BITSET_RATES = {0.1f, 0.5f, 0.95f, 1.0f};
+
+    knowhere::Json default_conf;
+    default_conf[knowhere::meta::TOPK] = TOPK;
+
+    uint64_t seed = 42;
+
+    float CHUNK_RECALL_THRESHOLD = 0.999f;
+
+    SECTION("Dense Vector Search on Chunk") {
+        const std::vector<std::string> DISTANCE_TYPES = {"L2", "IP", "COSINE"};
+        for (const auto& distance_type : DISTANCE_TYPES) {
+            for (const int32_t dim : DIMS) {
+                for (const int32_t nb : NBS) {
+                    auto train_ds = GenEmbListDataSet(nb, dim, seed, each_el_len);
+                    auto query_ds = GenDataSet(NQ, dim, seed);
+
+                    knowhere::Json conf = default_conf;
+                    conf[knowhere::meta::METRIC_TYPE] = distance_type;
+                    conf[knowhere::meta::DIM] = dim;
+                    conf[knowhere::meta::ROWS] = nb;
+
+                    auto golden_result =
+                        knowhere::BruteForce::Search<knowhere::fp32>(train_ds, query_ds, conf, nullptr);
+
+                    // use the same seed to generate same float vectors
+                    auto chunk_train_ds = GenChunkDataSet(nb, dim, seed, each_el_len);
+
+                    auto chunk_result =
+                        knowhere::BruteForce::Search<knowhere::fp32>(chunk_train_ds, query_ds, conf, nullptr);
+                    REQUIRE(chunk_result.has_value());
+                    float recall = GetKNNRecall(*golden_result.value(), *chunk_result.value());
+                    printf("recall: %f\n", recall);
+                    REQUIRE(recall > CHUNK_RECALL_THRESHOLD);
+
+                    // with filter
+                    for (const float bitset_rate : BITSET_RATES) {
+                        const int32_t filter_out_bits = nb * bitset_rate;
+                        const std::vector<uint8_t> bitset_data = GenerateBitsetWithRandomTbitsSet(nb, filter_out_bits);
+                        knowhere::BitsetView bitset_view =
+                            knowhere::BitsetView(bitset_data.data(), nb, filter_out_bits);
+
+                        auto golden_result =
+                            knowhere::BruteForce::Search<knowhere::fp32>(train_ds, query_ds, conf, bitset_view);
+                        auto chunk_result =
+                            knowhere::BruteForce::Search<knowhere::fp32>(chunk_train_ds, query_ds, conf, bitset_view);
+                        REQUIRE(chunk_result.has_value());
+                        float recall = GetKNNRecall(*golden_result.value(), *chunk_result.value());
+                        printf("bitset_rate: %f, recall: %f\n", bitset_rate, recall);
+                        REQUIRE(recall > CHUNK_RECALL_THRESHOLD);
+                    }
+
+                    // with datatype bf16
+                    {
+                        auto train_ds_typed = knowhere::ConvertToDataTypeIfNeeded<knowhere::bf16>(chunk_train_ds);
+                        auto query_ds_typed = knowhere::ConvertToDataTypeIfNeeded<knowhere::bf16>(query_ds);
+                        auto chunk_train_ds_typed = knowhere::ConvertToDataTypeIfNeeded<knowhere::bf16>(chunk_train_ds);
+
+                        auto golden_result_typed =
+                            knowhere::BruteForce::Search<knowhere::bf16>(train_ds_typed, query_ds_typed, conf, nullptr);
+                        auto chunk_result_typed = knowhere::BruteForce::Search<knowhere::bf16>(
+                            chunk_train_ds_typed, query_ds_typed, conf, nullptr);
+                        REQUIRE(chunk_result_typed.has_value());
+                        float recall = GetKNNRecall(*golden_result_typed.value(), *chunk_result_typed.value());
+                        printf("datatype [bf16], recall: %f\n", recall);
+                        REQUIRE(recall > CHUNK_RECALL_THRESHOLD);
+                    }
+
+                    // with datatype fp16
+                    {
+                        auto train_ds_typed = knowhere::ConvertToDataTypeIfNeeded<knowhere::fp16>(chunk_train_ds);
+                        auto query_ds_typed = knowhere::ConvertToDataTypeIfNeeded<knowhere::fp16>(query_ds);
+                        auto chunk_train_ds_typed = knowhere::ConvertToDataTypeIfNeeded<knowhere::fp16>(chunk_train_ds);
+
+                        auto golden_result_typed =
+                            knowhere::BruteForce::Search<knowhere::bf16>(train_ds_typed, query_ds_typed, conf, nullptr);
+                        auto chunk_result_typed = knowhere::BruteForce::Search<knowhere::bf16>(
+                            chunk_train_ds_typed, query_ds_typed, conf, nullptr);
+                        REQUIRE(chunk_result_typed.has_value());
+                        float recall = GetKNNRecall(*golden_result_typed.value(), *chunk_result_typed.value());
+                        printf("datatype [fp16], recall: %f\n", recall);
+                        REQUIRE(recall > CHUNK_RECALL_THRESHOLD);
+                    }
+
+                    // with datatype int8
+                    {
+                        auto train_ds_typed = knowhere::ConvertToDataTypeIfNeeded<knowhere::int8>(chunk_train_ds);
+                        auto query_ds_typed = knowhere::ConvertToDataTypeIfNeeded<knowhere::int8>(query_ds);
+                        auto chunk_train_ds_typed = knowhere::ConvertToDataTypeIfNeeded<knowhere::int8>(chunk_train_ds);
+
+                        auto golden_result_typed =
+                            knowhere::BruteForce::Search<knowhere::int8>(train_ds_typed, query_ds_typed, conf, nullptr);
+                        auto chunk_result_typed = knowhere::BruteForce::Search<knowhere::int8>(
+                            chunk_train_ds_typed, query_ds_typed, conf, nullptr);
+                        REQUIRE(chunk_result_typed.has_value());
+                        float recall = GetKNNRecall(*golden_result_typed.value(), *chunk_result_typed.value());
+                        printf("datatype [int8], recall: %f\n", recall);
+                        REQUIRE(recall > CHUNK_RECALL_THRESHOLD);
+                    }
+                }
+            }
+        }
+    }
+
+    SECTION("Binary VectorSearch on Chunk") {
+        const std::vector<std::string> DISTANCE_TYPES = {"JACCARD", "HAMMING"};
+        for (const auto& distance_type : DISTANCE_TYPES) {
+            for (const int32_t dim : DIMS) {
+                for (const int32_t nb : NBS) {
+                    auto train_ds = GenEmbListBinDataSet(nb, dim, seed, each_el_len);
+                    auto query_ds = GenBinDataSet(NQ, dim, seed);
+
+                    knowhere::Json conf = default_conf;
+                    conf[knowhere::meta::METRIC_TYPE] = distance_type;
+                    conf[knowhere::meta::DIM] = dim;
+                    conf[knowhere::meta::ROWS] = nb;
+
+                    auto golden_result =
+                        knowhere::BruteForce::Search<knowhere::bin1>(train_ds, query_ds, conf, nullptr);
+
+                    // use the same seed to generate same float vectors
+                    auto chunk_train_ds = GenChunkBinDataSet(nb, dim, seed, each_el_len);
+
+                    auto chunk_result =
+                        knowhere::BruteForce::Search<knowhere::bin1>(chunk_train_ds, query_ds, conf, nullptr);
+                    REQUIRE(chunk_result.has_value());
+                    float recall = GetKNNRecall(*golden_result.value(), *chunk_result.value());
+                    printf("recall: %f\n", recall);
+                    REQUIRE(recall > CHUNK_RECALL_THRESHOLD);
+
+                    // with filter
+                    for (const float bitset_rate : BITSET_RATES) {
+                        const int32_t filter_out_bits = nb * bitset_rate;
+                        const std::vector<uint8_t> bitset_data = GenerateBitsetWithRandomTbitsSet(nb, filter_out_bits);
+                        knowhere::BitsetView bitset_view =
+                            knowhere::BitsetView(bitset_data.data(), nb, filter_out_bits);
+
+                        auto golden_result =
+                            knowhere::BruteForce::Search<knowhere::bin1>(train_ds, query_ds, conf, bitset_view);
+                        auto chunk_result =
+                            knowhere::BruteForce::Search<knowhere::bin1>(chunk_train_ds, query_ds, conf, bitset_view);
+                        REQUIRE(chunk_result.has_value());
+                        float recall = GetKNNRecall(*golden_result.value(), *chunk_result.value());
+                        printf("bitset_rate: %f, recall: %f\n", bitset_rate, recall);
+                        REQUIRE(recall > CHUNK_RECALL_THRESHOLD);
+                    }
+                }
+            }
+        }
+    }
+
+    SECTION("Dense EmbList Search on Chunk") {
+        const std::vector<std::string> DISTANCE_TYPES = {"MAX_SIM_IP", "MAX_SIM_L2", "MAX_SIM_COSINE"};
+        for (const auto& distance_type : DISTANCE_TYPES) {
+            for (const int32_t dim : DIMS) {
+                for (const int32_t nb : NBS) {
+                    auto train_ds = GenEmbListDataSet(nb, dim, seed, each_el_len);
+                    auto query_ds = GenEmbListDataSet(NQ, dim, seed);
+                    auto num_el = (nb + each_el_len - 1) / each_el_len;
+
+                    knowhere::Json conf = default_conf;
+                    conf[knowhere::meta::METRIC_TYPE] = distance_type;
+                    conf[knowhere::meta::DIM] = dim;
+                    conf[knowhere::meta::ROWS] = nb;
+
+                    auto golden_result =
+                        knowhere::BruteForce::Search<knowhere::fp32>(train_ds, query_ds, conf, nullptr);
+
+                    // use the same seed to generate same float vectors
+                    auto chunk_train_ds = GenChunkDataSet(nb, dim, seed, each_el_len);
+
+                    auto chunk_result =
+                        knowhere::BruteForce::Search<knowhere::fp32>(chunk_train_ds, query_ds, conf, nullptr);
+                    REQUIRE(chunk_result.has_value());
+                    float recall = GetKNNRecall(*golden_result.value(), *chunk_result.value());
+                    printf("recall: %f\n", recall);
+                    REQUIRE(recall > CHUNK_RECALL_THRESHOLD);
+
+                    // with filter
+                    for (const float bitset_rate : BITSET_RATES) {
+                        const int32_t filter_out_bits = num_el * bitset_rate;
+                        const std::vector<uint8_t> bitset_data =
+                            GenerateBitsetByPartition(num_el, 1.0f - bitset_rate, 1);
+                        knowhere::BitsetView bitset_view =
+                            knowhere::BitsetView(bitset_data.data(), num_el, filter_out_bits);
+
+                        auto golden_result =
+                            knowhere::BruteForce::Search<knowhere::fp32>(train_ds, query_ds, conf, bitset_view);
+                        auto chunk_result =
+                            knowhere::BruteForce::Search<knowhere::fp32>(chunk_train_ds, query_ds, conf, bitset_view);
+                        REQUIRE(chunk_result.has_value());
+                        float recall = GetKNNRecall(*golden_result.value(), *chunk_result.value());
+                        printf("bitset_rate: %f, recall: %f\n", bitset_rate, recall);
+                        REQUIRE(recall > CHUNK_RECALL_THRESHOLD);
+                    }
+
+                    // with datatype bf16
+                    {
+                        auto train_ds_typed = knowhere::ConvertToDataTypeIfNeeded<knowhere::bf16>(chunk_train_ds);
+                        auto query_ds_typed = knowhere::ConvertToDataTypeIfNeeded<knowhere::bf16>(query_ds);
+                        auto chunk_train_ds_typed = knowhere::ConvertToDataTypeIfNeeded<knowhere::bf16>(chunk_train_ds);
+
+                        auto golden_result_typed =
+                            knowhere::BruteForce::Search<knowhere::bf16>(train_ds_typed, query_ds_typed, conf, nullptr);
+                        auto chunk_result_typed = knowhere::BruteForce::Search<knowhere::bf16>(
+                            chunk_train_ds_typed, query_ds_typed, conf, nullptr);
+                        REQUIRE(chunk_result_typed.has_value());
+                        float recall = GetKNNRecall(*golden_result_typed.value(), *chunk_result_typed.value());
+                        printf("datatype [bf16], recall: %f\n", recall);
+                        REQUIRE(recall > CHUNK_RECALL_THRESHOLD);
+                    }
+
+                    // with datatype fp16
+                    {
+                        auto train_ds_typed = knowhere::ConvertToDataTypeIfNeeded<knowhere::fp16>(chunk_train_ds);
+                        auto query_ds_typed = knowhere::ConvertToDataTypeIfNeeded<knowhere::fp16>(query_ds);
+                        auto chunk_train_ds_typed = knowhere::ConvertToDataTypeIfNeeded<knowhere::fp16>(chunk_train_ds);
+
+                        auto golden_result_typed =
+                            knowhere::BruteForce::Search<knowhere::bf16>(train_ds_typed, query_ds_typed, conf, nullptr);
+                        auto chunk_result_typed = knowhere::BruteForce::Search<knowhere::bf16>(
+                            chunk_train_ds_typed, query_ds_typed, conf, nullptr);
+                        REQUIRE(chunk_result_typed.has_value());
+                        float recall = GetKNNRecall(*golden_result_typed.value(), *chunk_result_typed.value());
+                        printf("datatype [fp16], recall: %f\n", recall);
+                        REQUIRE(recall > CHUNK_RECALL_THRESHOLD);
+                    }
+
+                    // with datatype int8
+                    {
+                        auto train_ds_typed = knowhere::ConvertToDataTypeIfNeeded<knowhere::int8>(chunk_train_ds);
+                        auto query_ds_typed = knowhere::ConvertToDataTypeIfNeeded<knowhere::int8>(query_ds);
+                        auto chunk_train_ds_typed = knowhere::ConvertToDataTypeIfNeeded<knowhere::int8>(chunk_train_ds);
+
+                        auto golden_result_typed =
+                            knowhere::BruteForce::Search<knowhere::int8>(train_ds_typed, query_ds_typed, conf, nullptr);
+                        auto chunk_result_typed = knowhere::BruteForce::Search<knowhere::int8>(
+                            chunk_train_ds_typed, query_ds_typed, conf, nullptr);
+                        REQUIRE(chunk_result_typed.has_value());
+                        float recall = GetKNNRecall(*golden_result_typed.value(), *chunk_result_typed.value());
+                        printf("datatype [int8], recall: %f\n", recall);
+                        REQUIRE(recall > CHUNK_RECALL_THRESHOLD);
+                    }
+                }
+            }
+        }
+    }
+
+    SECTION("Binary EmbList Search on Chunk") {
+        const std::vector<std::string> DISTANCE_TYPES = {"MAX_SIM_HAMMING", "MAX_SIM_JACCARD"};
+
+        for (const auto& distance_type : DISTANCE_TYPES) {
+            for (const int32_t dim : DIMS) {
+                for (const int32_t nb : NBS) {
+                    auto train_ds = GenEmbListBinDataSet(nb, dim, seed, each_el_len);
+                    auto query_ds = GenEmbListBinDataSet(NQ, dim, seed);
+                    auto num_el = (nb + each_el_len - 1) / each_el_len;
+
+                    knowhere::Json conf = default_conf;
+                    conf[knowhere::meta::METRIC_TYPE] = distance_type;
+                    conf[knowhere::meta::DIM] = dim;
+                    conf[knowhere::meta::ROWS] = nb;
+
+                    auto golden_result =
+                        knowhere::BruteForce::Search<knowhere::bin1>(train_ds, query_ds, conf, nullptr);
+
+                    // use the same seed to generate same float vectors
+                    auto chunk_train_ds = GenChunkBinDataSet(nb, dim, seed, each_el_len);
+
+                    auto chunk_result =
+                        knowhere::BruteForce::Search<knowhere::bin1>(chunk_train_ds, query_ds, conf, nullptr);
+                    REQUIRE(chunk_result.has_value());
+                    float recall = GetKNNRecall(*golden_result.value(), *chunk_result.value());
+                    printf("recall: %f\n", recall);
+                    REQUIRE(recall > CHUNK_RECALL_THRESHOLD);
+
+                    // with filter
+                    for (const float bitset_rate : BITSET_RATES) {
+                        const int32_t filter_out_bits = num_el * bitset_rate;
+                        const std::vector<uint8_t> bitset_data =
+                            GenerateBitsetByPartition(num_el, 1.0f - bitset_rate, 1);
+                        knowhere::BitsetView bitset_view =
+                            knowhere::BitsetView(bitset_data.data(), num_el, filter_out_bits);
+
+                        auto golden_result =
+                            knowhere::BruteForce::Search<knowhere::bin1>(train_ds, query_ds, conf, bitset_view);
+                        auto chunk_result =
+                            knowhere::BruteForce::Search<knowhere::bin1>(chunk_train_ds, query_ds, conf, bitset_view);
+                        REQUIRE(chunk_result.has_value());
+                        float recall = GetKNNRecall(*golden_result.value(), *chunk_result.value());
+                        printf("bitset_rate: %f, recall: %f\n", bitset_rate, recall);
+                        REQUIRE(recall > CHUNK_RECALL_THRESHOLD);
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("Test brute force anniterator on chunk", "[on_chunk]") {
+    const std::vector<int32_t> DIMS = {8};
+    const std::vector<int32_t> NBS = {1000};
+    const int32_t NQ = 10;
+    const int32_t TOPK = 16;
+    const int32_t each_el_len = 10;
+    const std::vector<float> BITSET_RATES = {0.1f, 0.5f, 0.95f, 1.0f};
+
+    knowhere::Json default_conf;
+    default_conf[knowhere::meta::TOPK] = TOPK;
+
+    uint64_t seed = 42;
+
+    SECTION("Dense AnnIterator on Chunk") {
+        const std::vector<std::string> DISTANCE_TYPES = {"L2", "IP", "COSINE"};
+        for (const auto& distance_type : DISTANCE_TYPES) {
+            for (const int32_t dim : DIMS) {
+                for (const int32_t nb : NBS) {
+                    auto train_ds = GenEmbListDataSet(nb, dim, seed, each_el_len);
+                    auto query_ds = GenDataSet(NQ, dim, seed);
+                    // use the same seed to generate same float vectors
+                    auto chunk_train_ds = GenChunkDataSet(nb, dim, seed, each_el_len);
+
+                    knowhere::Json conf = default_conf;
+                    conf[knowhere::meta::METRIC_TYPE] = distance_type;
+                    conf[knowhere::meta::DIM] = dim;
+                    conf[knowhere::meta::ROWS] = nb;
+
+                    auto golden_result_iter_or =
+                        knowhere::BruteForce::AnnIterator<knowhere::fp32>(train_ds, query_ds, conf, nullptr);
+                    REQUIRE(golden_result_iter_or.has_value());
+                    auto golden_result_iter = golden_result_iter_or.value();
+
+                    auto chunk_result_iter_or =
+                        knowhere::BruteForce::AnnIterator<knowhere::fp32>(chunk_train_ds, query_ds, conf, nullptr);
+                    REQUIRE(chunk_result_iter_or.has_value());
+                    auto chunk_result_iter = chunk_result_iter_or.value();
+
+                    for (auto j = 0; j < NQ; ++j) {
+                        REQUIRE(check_same_iterator(golden_result_iter[j], chunk_result_iter[j]));
+                    }
+
+                    // with filter
+                    for (const float bitset_rate : BITSET_RATES) {
+                        const int32_t filter_out_bits = nb * bitset_rate;
+                        const std::vector<uint8_t> bitset_data = GenerateBitsetWithRandomTbitsSet(nb, filter_out_bits);
+                        knowhere::BitsetView bitset_view =
+                            knowhere::BitsetView(bitset_data.data(), nb, filter_out_bits);
+
+                        auto golden_result_iter_or =
+                            knowhere::BruteForce::AnnIterator<knowhere::fp32>(train_ds, query_ds, conf, bitset_view);
+                        REQUIRE(golden_result_iter_or.has_value());
+                        auto golden_result_iter = golden_result_iter_or.value();
+
+                        auto chunk_result_iter_or = knowhere::BruteForce::AnnIterator<knowhere::fp32>(
+                            chunk_train_ds, query_ds, conf, bitset_view);
+                        REQUIRE(chunk_result_iter_or.has_value());
+                        auto chunk_result_iter = chunk_result_iter_or.value();
+
+                        for (auto j = 0; j < NQ; ++j) {
+                            REQUIRE(check_same_iterator(golden_result_iter[j], chunk_result_iter[j]));
+                        }
+                    }
+
+                    // with datatype bf16
+                    {
+                        auto train_ds_typed = knowhere::ConvertToDataTypeIfNeeded<knowhere::bf16>(chunk_train_ds);
+                        auto query_ds_typed = knowhere::ConvertToDataTypeIfNeeded<knowhere::bf16>(query_ds);
+                        auto chunk_train_ds_typed = knowhere::ConvertToDataTypeIfNeeded<knowhere::bf16>(chunk_train_ds);
+
+                        auto golden_result_iter_or = knowhere::BruteForce::AnnIterator<knowhere::bf16>(
+                            train_ds_typed, query_ds_typed, conf, nullptr);
+                        REQUIRE(golden_result_iter_or.has_value());
+                        auto golden_result_iter = golden_result_iter_or.value();
+
+                        auto chunk_result_iter_or = knowhere::BruteForce::AnnIterator<knowhere::bf16>(
+                            chunk_train_ds_typed, query_ds_typed, conf, nullptr);
+                        REQUIRE(chunk_result_iter_or.has_value());
+                        auto chunk_result_iter = chunk_result_iter_or.value();
+
+                        for (auto j = 0; j < NQ; ++j) {
+                            REQUIRE(check_same_iterator(golden_result_iter[j], chunk_result_iter[j]));
+                        }
+                    }
+
+                    // with datatype fp16
+                    {
+                        auto train_ds_typed = knowhere::ConvertToDataTypeIfNeeded<knowhere::fp16>(chunk_train_ds);
+                        auto query_ds_typed = knowhere::ConvertToDataTypeIfNeeded<knowhere::fp16>(query_ds);
+                        auto chunk_train_ds_typed = knowhere::ConvertToDataTypeIfNeeded<knowhere::fp16>(chunk_train_ds);
+
+                        auto golden_result_iter_or = knowhere::BruteForce::AnnIterator<knowhere::fp16>(
+                            train_ds_typed, query_ds_typed, conf, nullptr);
+                        REQUIRE(golden_result_iter_or.has_value());
+                        auto golden_result_iter = golden_result_iter_or.value();
+
+                        auto chunk_result_iter_or = knowhere::BruteForce::AnnIterator<knowhere::fp16>(
+                            chunk_train_ds_typed, query_ds_typed, conf, nullptr);
+                        REQUIRE(chunk_result_iter_or.has_value());
+                        auto chunk_result_iter = chunk_result_iter_or.value();
+
+                        for (auto j = 0; j < NQ; ++j) {
+                            REQUIRE(check_same_iterator(golden_result_iter[j], chunk_result_iter[j]));
+                        }
+                    }
+
+                    // with datatype int8
+                    {
+                        auto train_ds_typed = knowhere::ConvertToDataTypeIfNeeded<knowhere::int8>(chunk_train_ds);
+                        auto query_ds_typed = knowhere::ConvertToDataTypeIfNeeded<knowhere::int8>(query_ds);
+                        auto chunk_train_ds_typed = knowhere::ConvertToDataTypeIfNeeded<knowhere::int8>(chunk_train_ds);
+
+                        auto golden_result_iter_or = knowhere::BruteForce::AnnIterator<knowhere::int8>(
+                            train_ds_typed, query_ds_typed, conf, nullptr);
+                        REQUIRE(golden_result_iter_or.has_value());
+                        auto golden_result_iter = golden_result_iter_or.value();
+
+                        auto chunk_result_iter_or = knowhere::BruteForce::AnnIterator<knowhere::int8>(
+                            chunk_train_ds_typed, query_ds_typed, conf, nullptr);
+                        REQUIRE(chunk_result_iter_or.has_value());
+                        auto chunk_result_iter = chunk_result_iter_or.value();
+
+                        for (auto j = 0; j < NQ; ++j) {
+                            REQUIRE(check_same_iterator(golden_result_iter[j], chunk_result_iter[j]));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    SECTION("Binary AnnIterator on Chunk") {
+        const std::vector<std::string> DISTANCE_TYPES = {"JACCARD", "HAMMING"};
+
+        for (const auto& distance_type : DISTANCE_TYPES) {
+            for (const int32_t dim : DIMS) {
+                for (const int32_t nb : NBS) {
+                    auto train_ds = GenEmbListBinDataSet(nb, dim, seed, each_el_len);
+                    auto query_ds = GenBinDataSet(NQ, dim, seed);
+                    // use the same seed to generate same float vectors
+                    auto chunk_train_ds = GenChunkBinDataSet(nb, dim, seed, each_el_len);
+
+                    knowhere::Json conf = default_conf;
+                    conf[knowhere::meta::METRIC_TYPE] = distance_type;
+                    conf[knowhere::meta::DIM] = dim;
+                    conf[knowhere::meta::ROWS] = nb;
+
+                    auto golden_result_iter_or =
+                        knowhere::BruteForce::AnnIterator<knowhere::bin1>(train_ds, query_ds, conf, nullptr);
+                    REQUIRE(golden_result_iter_or.has_value());
+                    auto golden_result_iter = golden_result_iter_or.value();
+
+                    auto chunk_result_iter_or =
+                        knowhere::BruteForce::AnnIterator<knowhere::bin1>(chunk_train_ds, query_ds, conf, nullptr);
+                    REQUIRE(chunk_result_iter_or.has_value());
+                    auto chunk_result_iter = chunk_result_iter_or.value();
+
+                    for (auto j = 0; j < NQ; ++j) {
+                        REQUIRE(check_same_iterator(golden_result_iter[j], chunk_result_iter[j]));
+                    }
+
+                    // with filter
+                    for (const float bitset_rate : BITSET_RATES) {
+                        const int32_t filter_out_bits = nb * bitset_rate;
+                        const std::vector<uint8_t> bitset_data = GenerateBitsetWithRandomTbitsSet(nb, filter_out_bits);
+                        knowhere::BitsetView bitset_view =
+                            knowhere::BitsetView(bitset_data.data(), nb, filter_out_bits);
+
+                        auto golden_result_iter_or =
+                            knowhere::BruteForce::AnnIterator<knowhere::bin1>(train_ds, query_ds, conf, nullptr);
+                        REQUIRE(golden_result_iter_or.has_value());
+                        auto golden_result_iter = golden_result_iter_or.value();
+
+                        auto chunk_result_iter_or =
+                            knowhere::BruteForce::AnnIterator<knowhere::bin1>(chunk_train_ds, query_ds, conf, nullptr);
+                        REQUIRE(chunk_result_iter_or.has_value());
+                        auto chunk_result_iter = chunk_result_iter_or.value();
+
+                        for (auto j = 0; j < NQ; ++j) {
+                            REQUIRE(check_same_iterator(golden_result_iter[j], chunk_result_iter[j]));
                         }
                     }
                 }

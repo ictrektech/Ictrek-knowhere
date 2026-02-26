@@ -35,8 +35,7 @@ namespace pipeann {
     if (m == pipeann::Metric::L2) {
       return new pipeann::DistanceL2UInt8();
     } else if (m == pipeann::Metric::COSINE) {
-      LOG(INFO) << "AVX/AVX2 distance function not defined for Uint8. Using slow version.";
-      return new pipeann::SlowDistanceCosineUInt8();
+      return new pipeann::DistanceCosineUInt8();
     } else {
       LOG(ERROR) << "Only L2 and Cosine metric supported as of now.";
       crash();

@@ -83,7 +83,7 @@ int search_disk_index(int argc, char **argv) {
   pipeann::load_bin<T>(query_bin, query, query_num, query_dim);
   // std::load_aligned_bin<T>(query_bin, query, query_num, query_dim, query_aligned_dim);
 
-  if (file_exists(truthset_bin)) {
+  if (pipeann::file_exists(truthset_bin)) {
     pipeann::load_truthset(truthset_bin, gt_ids, gt_dists, gt_num, gt_dim, &tags);
     if (gt_num != query_num) {
       std::cout << "Error. Mismatch in number of queries and ground truth data" << std::endl;
@@ -91,8 +91,8 @@ int search_disk_index(int argc, char **argv) {
     calc_recall_flag = true;
   }
 
-  std::shared_ptr<AlignedFileReader> reader = nullptr;
-  reader.reset(new LinuxAlignedFileReader());
+  std::shared_ptr<pipeann::AlignedFileReader> reader = nullptr;
+  reader.reset(new pipeann::LinuxAlignedFileReader());
 
   std::unique_ptr<pipeann::SSDIndex<T>> _pFlashIndex(
       new pipeann::SSDIndex<T>(m, reader, SearchMode(search_mode), tags_flag));
@@ -220,10 +220,6 @@ int search_disk_index(int argc, char **argv) {
   run_tests(0, false);
   Lvec[0] = prev_L;
   LOG(INFO) << "Warming up finished.";
-
-  LOG(INFO) << "----------------sleep 60s for begin test";
-  sleep(60);
-  LOG(INFO) << "----------------begin test";
 
 
   std::cout.setf(std::ios_base::fixed, std::ios_base::floatfield);

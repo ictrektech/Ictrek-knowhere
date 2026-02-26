@@ -131,7 +131,7 @@ include(cmake/libs/libhnsw.cmake)
 include(cmake/libs/libfaiss.cmake)
 
 if(WITH_COVERAGE)
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fprofile-arcs -ftest-coverage}")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fprofile-arcs -ftest-coverage")
 endif()
 
 if(NOT WITH_LIGHT)

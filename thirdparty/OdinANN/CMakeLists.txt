@@ -24,6 +24,7 @@ include_directories(
 add_compile_options(
 	-fopenmp 
 	-fopenmp-simd
+	-ffast-math
 	-Wall
 	-Wextra
 	-Wfatal-errors
@@ -32,7 +33,7 @@ add_compile_options(
 	-Wno-unused-parameter
 	-Wno-unused-but-set-variable
 )
-add_compile_options(-g -O3 -march=native -mtune=native -ftree-vectorize -funroll-loops)
+add_compile_options(-g -O3 -march=native -mtune=native -ftree-vectorize -funroll-loops -fno-omit-frame-pointer)
 
 message("Additional definitions: " $ENV{ADDITIONAL_DEFINITIONS})
 add_definitions(
@@ -96,6 +97,7 @@ check_cxx_compiler_flag("-mavx2" COMPILER_SUPPORTS_AVX2)
 # Then, for the runtime.
 set(CPU_SUPPORTS_AVX512 FALSE)
 set(CPU_SUPPORTS_AVX2 FALSE)
+set(CPU_SUPPORTS_SVE2 FALSE)
 try_run(
 	RUN_RESULT
 	COMPILE_RESULT
@@ -105,47 +107,80 @@ try_run(
 	RUN_OUTPUT_VARIABLE RUN_OUT
 )
 
+function(check_sve2_cpuinfo OUTPUT_VAR)
+    if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|ARM64|arm64")
+        set(${OUTPUT_VAR} FALSE PARENT_SCOPE)
+        return()
+    endif()
+
+    set(HAVE_SVE2 FALSE)
+    if(EXISTS "/proc/cpuinfo")
+        file(READ "/proc/cpuinfo" CPUINFO)
+        if(CPUINFO MATCHES "flags[ \t]*:.*[ \t]sve2([ \t]|$)" OR CPUINFO MATCHES "Features[ \t]*:.*[ \t]sve2([ \t]|$)")
+            set(HAVE_SVE2 TRUE)
+        endif()
+    endif()
+    set(${OUTPUT_VAR} ${HAVE_SVE2} PARENT_SCOPE)
+endfunction()
+
+check_sve2_cpuinfo(COMPILER_SUPPORTS_SVE2)
+
+set(USE_ARMPL FALSE)
 if(COMPILE_RESULT AND RUN_RESULT EQUAL 3) # AVX512 + AVX2
 	set(CPU_SUPPORTS_AVX512 TRUE)
 	message(STATUS "CPU supports AVX512")
 elseif(COMPILE_RESULT AND RUN_RESULT EQUAL 1) # AVX2
 	set(CPU_SUPPORTS_AVX2 TRUE)
 	message(STATUS "CPU supports AVX2")
+elseif(COMPILER_SUPPORTS_SVE2)
+	set(CPU_SUPPORTS_SVE2 TRUE)
+	set(USE_ARMPL TRUE)
+	message(STATUS "CPU supports SVE2")
 else()
-	message(STATUS "CPU doesn't support AVX512 or AVX2")
+	message(STATUS "CPU does not support AVX512 or detection failed")
 endif()
 
-if(CPU_SUPPORTS_AVX512)
-	add_definitions(-mavx512f)
-elseif(CPU_SUPPORTS_AVX2)
-	add_definitions(-mavx2)
+if(COMPILER_SUPPORTS_AVX512F AND CPU_SUPPORTS_AVX512)
+    message(STATUS "Compiler and CPU supports -mavx512f. Enabling AVX512F.")
+	add_definitions(-DUSE_AVX512)
+elseif(COMPILER_SUPPORTS_AVX2 AND CPU_SUPPORTS_AVX2)
+	message(STATUS "Compiler and CPU supports -mavx2. Enabling AVX2.")
+	add_definitions(-DUSE_AVX2)
+elseif(COMPILER_SUPPORTS_SVE2 AND CPU_SUPPORTS_SVE2)
+	message(STATUS "Compiler and CPU supports armv8.2-a+sve2. Enabling SVE2.")
+	add_definitions(-DUSE_SVE2)
+	add_definitions(-DSVE_MAX_SUPPORT_BITS=128)
+	add_compile_options(-march=armv8.2-a+sve2)
+	if (USE_ARMPL)
+		add_definitions(-DUSE_ARMPL)
+		include_directories(/opt/arm/armpl_25.07_gcc/include)
+		link_directories(/opt/arm/armpl_25.07_gcc/lib)
+		link_libraries(/opt/arm/armpl_25.07_gcc/lib/libarmpl.so)
+	endif()
+else()
+    message(STATUS "Compiler or CPU do not support -mavx512f, -mavx2 and sve2.")
 endif()
 
-file(GLOB_RECURSE SOURCES 
-	"src/*.cpp"
-	"src/*.c"
-	"src/*/*.cpp"
-	"src/*/*.c"
-)
-add_library(odinann STATIC ${SOURCES})
+#OpenMP
+find_package(OpenMP)
+if (OPENMP_FOUND)
+    set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${OpenMP_C_FLAGS}")
+    set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
+else()
+    message(FATAL_ERROR "No OpenMP support")
+endif()
 
-add_executable(search_memory_index tests/search_memory_index.cpp)
-target_link_libraries(search_memory_index odinann)
+if (NOT USE_ARMPL)	
+	find_package(BLAS)
+	if(BLAS_FOUND)
+		message(STATUS "BLAS found, BLAS_LIBRARIES = ${BLAS_LIBRARIES}")
+		link_libraries(${BLAS_LIBRARIES})
+	else()
+		message(FATAL_ERROR "BLAS is required but was not found.")
+	endif()
+endif()
 
-add_executable(build_memory_index tests/build_memory_index.cpp)
-target_link_libraries(build_memory_index odinann)
-
-add_executable(search_disk_index tests/search_disk_index.cpp)
-target_link_libraries(search_disk_index odinann)
-
-add_executable(build_disk_index tests/build_disk_index.cpp)
-target_link_libraries(build_disk_index odinann)
-
-add_executable(update_disk_index tests/update_disk_index.cpp)
-target_link_libraries(update_disk_index odinann)
-
-add_executable(search_cache_index tests/search_cache_index.cpp)
-target_link_libraries(search_cache_index odinann)
-
-add_executable(build_cache_index tests/build_cache_index.cpp)
-target_link_libraries(build_cache_index odinann)
+add_subdirectory(src)
+add_subdirectory(tests)
+add_subdirectory(tests/utils)
+# add_subdirectory(python)

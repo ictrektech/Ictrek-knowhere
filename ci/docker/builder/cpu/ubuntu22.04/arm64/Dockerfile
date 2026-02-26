@@ -1,7 +1,7 @@
 FROM docker.m.daocloud.io/ubuntu:22.04
 
-ENV https_proxy=http://192.168.1.202:8889
-ENV http_proxy=http://192.168.1.202:8889
+ARG http_proxy=http://192.168.1.86:7890
+ARG https_proxy=http://192.168.1.86:7890
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV CMAKE_VERSION="v3.28.5"
@@ -55,32 +55,27 @@ RUN apt update \
     && pip3 install conan==1.61.0 \
     && conan remote add default-conan-local https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local
 
-#RUN  apt install -y liburing-dev 
+# RUN  apt install -y liburing-dev 
 
-#COPY knowhere /knowhere
-#RUN cd knowhere \
-#    && mkdir -p build && cd build \
-#    && conan install .. --build=missing -o with_ut=True -o with_diskann=True -o with_odinann=True -s compiler.libcxx=libstdc++11 -s build_type=Release \
-    #&& conan build .. \
-    #&& cd ../.. && rm -rf knowhere
+# COPY knowhere /knowhere
+# RUN cd knowhere \
+#     && mkdir -p build && cd build \
+#     && conan install .. --build=missing -o with_ut=True -o with_diskann=True -o with_odinann=True -s compiler.libcxx=libstdc++11 -s build_type=Release \
+#     && conan build .. \
+#     && cd ../.. && rm -rf knowhere
 
 
-#docker build -f knowhere/ci/docker/builder/cpu/ubuntu22.04/arm64/Dockerfile -t knowhere-builder .
-# docker run -it  --name knowhere-debug \
- # -v ~/wy/knowhere:/knowhere \
- # knowhere-builder \
- # /bin/bash
+# docker build -f knowhere/ci/docker/builder/cpu/ubuntu22.04/arm64/Dockerfile -t knowhere-builder .
+# docker run -it  --name knowhere-debug -v ~/wy/knowhere:/knowhere knowhere-builder /bin/bash
   
- # docker start/stop knowhere-debug
+# docker start/stop knowhere-debug
   
 
   
 #4.手动执行前面dockerfile编译命令
- # docker exec -it knowhere-debug bash
- #cd knowhere 
- # mkdir -p build && cd build 
-  
-  
- #conan install .. --build=missing -o with_ut=True -o with_diskann=True -o with_odinann=True -s compiler.libcxx=libstdc++11 -s build_type=Release 
- 
- #   conan build .. 
+# docker exec -it knowhere-debug bash
+# cd knowhere 
+# mkdir -p build && cd build 
+
+# conan install .. --build=missing -o with_ut=True -o with_diskann=True -o with_odinann=True -s compiler.libcxx=libstdc++11 -s build_type=Release 
+# conan build .. 

@@ -29,6 +29,7 @@
 #include "faiss/IndexCosine.h"
 #include "faiss/IndexHNSW.h"
 #include "faiss/IndexRefine.h"
+#include "faiss/IndexSQ4Uniform.h"
 #include "faiss/impl/ScalarQuantizer.h"
 #include "faiss/impl/mapped_io.h"
 #include "faiss/index_io.h"
@@ -47,6 +48,7 @@
 #include "knowhere/comp/task.h"
 #include "knowhere/comp/time_recorder.h"
 #include "knowhere/config.h"
+#include "knowhere/context.h"
 #include "knowhere/expected.h"
 #include "knowhere/index/index_factory.h"
 #include "knowhere/index/index_node_data_mock_wrapper.h"
@@ -1273,7 +1275,20 @@ class BaseFaissRegularIndexHNSWNode : public BaseFaissRegularIndexNode {
 
         BitsetView bitset(bitset_);
         if (!internal_offset_to_most_external_id.empty()) {
-            bitset.set_out_ids(internal_offset_to_most_external_id.data(), internal_offset_to_most_external_id.size());
+            if (emb_list_offset_ != nullptr) {
+                // if emb list, manually calculate the number of filtered out ids
+                size_t num_filtered_out_ids = 0;
+                for (size_t i = 0; i < bitset.size(); i++) {
+                    if (bitset.test(i)) {
+                        num_filtered_out_ids += emb_list_offset_->offset[i + 1] - emb_list_offset_->offset[i];
+                    }
+                }
+                bitset.set_out_ids(internal_offset_to_most_external_id.data(),
+                                   internal_offset_to_most_external_id.size(), num_filtered_out_ids);
+            } else {
+                bitset.set_out_ids(internal_offset_to_most_external_id.data(),
+                                   internal_offset_to_most_external_id.size());
+            }
         }
         auto index_id = getIndexToSearchByScalarInfo(bitset);
         if (index_id < 0) {
@@ -1361,6 +1376,7 @@ class BaseFaissRegularIndexHNSWNode : public BaseFaissRegularIndexNode {
                 futs.emplace_back(search_pool->push([&, idx = i, is_refined = is_refined,
                                                      index_wrapper_ptr = index_wrapper_ptr,
                                                      bf_index_wrapper_ptr = bf_index_wrapper_ptr]() {
+                    knowhere::checkCancellation(op_context);
                     // 1 thread per element
                     ThreadPool::ScopedSearchOmpSetter setter(1);
 
@@ -1389,7 +1405,10 @@ class BaseFaissRegularIndexHNSWNode : public BaseFaissRegularIndexNode {
                             real_topk++;
                         }
                         if (real_topk < k && real_topk < bitset.size() - bitset.count() &&
-                            bf_index_wrapper_ptr != nullptr) {
+                            bf_index_wrapper_ptr != nullptr && !hnsw_cfg.disable_fallback_brute_force.value()) {
+                            LOG_KNOWHERE_WARNING_ << "required topk: " << k
+                                                  << ", but the actual num of results got from hnsw: " << real_topk
+                                                  << ", trigger brute force search as fallback for hnsw search";
                             return true;
                         }
                         return false;
@@ -1465,7 +1484,7 @@ class BaseFaissRegularIndexHNSWNode : public BaseFaissRegularIndexNode {
 
     expected<DataSetPtr>
     CalcDistByIDs(const DataSetPtr dataset, const BitsetView& bitset_, const int64_t* labels, const size_t labels_len,
-                  milvus::OpContext* op_context) const override {
+                  const bool /*is_cosine*/, milvus::OpContext* op_context) const override {
         if (this->indexes.empty()) {
             return expected<DataSetPtr>::Err(Status::empty_index, "index not loaded");
         }
@@ -1484,7 +1503,11 @@ class BaseFaissRegularIndexHNSWNode : public BaseFaissRegularIndexNode {
 
         BitsetView bitset(bitset_);
         if (!internal_offset_to_most_external_id.empty()) {
-            bitset.set_out_ids(internal_offset_to_most_external_id.data(), internal_offset_to_most_external_id.size());
+            // Note: We do not need to calculate the actual number of filtered ids here;
+            // we only need the bitset to determine the index_id.
+            int32_t num_filtered_out_ids = 0;
+            bitset.set_out_ids(internal_offset_to_most_external_id.data(), internal_offset_to_most_external_id.size(),
+                               num_filtered_out_ids);
         }
         auto index_id = getIndexToSearchByScalarInfo(bitset);
         if (index_id < 0) {
@@ -1496,6 +1519,7 @@ class BaseFaissRegularIndexHNSWNode : public BaseFaissRegularIndexNode {
             futs.reserve(rows);
             for (auto i = 0; i < rows; i++) {
                 futs.emplace_back(search_pool->push([&, idx = i, index_id = index_id]() {
+                    knowhere::checkCancellation(op_context);
                     // set up a distance computer
                     std::unique_ptr<faiss::DistanceComputer> dist_computer;
                     const faiss::IndexRefine* index_refine =
@@ -1638,73 +1662,79 @@ class BaseFaissRegularIndexHNSWNode : public BaseFaissRegularIndexNode {
         std::vector<std::vector<int64_t>> result_id_array(rows);
         std::vector<std::vector<float>> result_dist_array(rows);
 
-        std::vector<folly::Future<folly::Unit>> futs;
-        futs.reserve(rows);
+        try {
+            std::vector<folly::Future<folly::Unit>> futs;
+            futs.reserve(rows);
 
-        // a sequential version
-        for (int64_t i = 0; i < rows; ++i) {
-            // const int64_t idx = i;
-            // {
+            // a sequential version
+            for (int64_t i = 0; i < rows; ++i) {
+                // const int64_t idx = i;
+                // {
 
-            futs.emplace_back(
-                search_pool->push([&, idx = i, is_refined = is_refined, index_wrapper_ptr = index_wrapper_ptr] {
-                    // 1 thread per element
-                    ThreadPool::ScopedSearchOmpSetter setter(1);
+                futs.emplace_back(
+                    search_pool->push([&, idx = i, is_refined = is_refined, index_wrapper_ptr = index_wrapper_ptr] {
+                        knowhere::checkCancellation(op_context);
+                        // 1 thread per element
+                        ThreadPool::ScopedSearchOmpSetter setter(1);
 
-                    // set up a query
-                    const float* cur_query = nullptr;
+                        // set up a query
+                        const float* cur_query = nullptr;
 
-                    std::vector<float> cur_query_tmp(dim);
-                    if (data_format == DataFormatEnum::fp32) {
-                        cur_query = (const float*)data + idx * dim;
-                    } else {
-                        convert_rows_to_fp32(data, cur_query_tmp.data(), data_format, idx, 1, dim);
-                        cur_query = cur_query_tmp.data();
-                    }
-
-                    // initialize a buffer
-                    faiss::RangeSearchResult res(1);
-
-                    // perform the search
-                    if (is_refined) {
-                        faiss::IndexRefineSearchParameters refine_params;
-                        refine_params.k_factor = hnsw_cfg.refine_k.value_or(1);
-                        // a refine procedure itself does not need to care about filtering
-                        refine_params.sel = nullptr;
-                        refine_params.base_index_params = &hnsw_search_params;
-
-                        index_wrapper_ptr->range_search(1, cur_query, radius, &res, &refine_params);
-                    } else {
-                        index_wrapper_ptr->range_search(1, cur_query, radius, &res, &hnsw_search_params);
-                    }
-
-                    // post-process
-                    const size_t elem_cnt = res.lims[1];
-                    result_dist_array[idx].resize(elem_cnt);
-                    result_id_array[idx].resize(elem_cnt);
-
-                    if (labels.empty()) {
-                        for (size_t j = 0; j < elem_cnt; j++) {
-                            result_dist_array[idx][j] = res.distances[j];
-                            result_id_array[idx][j] = res.labels[j];
+                        std::vector<float> cur_query_tmp(dim);
+                        if (data_format == DataFormatEnum::fp32) {
+                            cur_query = (const float*)data + idx * dim;
+                        } else {
+                            convert_rows_to_fp32(data, cur_query_tmp.data(), data_format, idx, 1, dim);
+                            cur_query = cur_query_tmp.data();
                         }
-                    } else {
-                        for (size_t j = 0; j < elem_cnt; j++) {
-                            result_dist_array[idx][j] = res.distances[j];
-                            result_id_array[idx][j] =
-                                res.labels[j] < 0 ? res.labels[j] : labels[index_id]->operator[](res.labels[j]);
-                        }
-                    }
 
-                    if (hnsw_cfg.range_filter.value() != defaultRangeFilter) {
-                        FilterRangeSearchResultForOneNq(result_dist_array[idx], result_id_array[idx],
-                                                        is_similarity_metric, radius, range_filter);
-                    }
-                }));
+                        // initialize a buffer
+                        faiss::RangeSearchResult res(1);
+
+                        // perform the search
+                        if (is_refined) {
+                            faiss::IndexRefineSearchParameters refine_params;
+                            refine_params.k_factor = hnsw_cfg.refine_k.value_or(1);
+                            // a refine procedure itself does not need to care about filtering
+                            refine_params.sel = nullptr;
+                            refine_params.base_index_params = &hnsw_search_params;
+
+                            index_wrapper_ptr->range_search(1, cur_query, radius, &res, &refine_params);
+                        } else {
+                            index_wrapper_ptr->range_search(1, cur_query, radius, &res, &hnsw_search_params);
+                        }
+
+                        // post-process
+                        const size_t elem_cnt = res.lims[1];
+                        result_dist_array[idx].resize(elem_cnt);
+                        result_id_array[idx].resize(elem_cnt);
+
+                        if (labels.empty()) {
+                            for (size_t j = 0; j < elem_cnt; j++) {
+                                result_dist_array[idx][j] = res.distances[j];
+                                result_id_array[idx][j] = res.labels[j];
+                            }
+                        } else {
+                            for (size_t j = 0; j < elem_cnt; j++) {
+                                result_dist_array[idx][j] = res.distances[j];
+                                result_id_array[idx][j] =
+                                    res.labels[j] < 0 ? res.labels[j] : labels[index_id]->operator[](res.labels[j]);
+                            }
+                        }
+
+                        if (hnsw_cfg.range_filter.value() != defaultRangeFilter) {
+                            FilterRangeSearchResultForOneNq(result_dist_array[idx], result_id_array[idx],
+                                                            is_similarity_metric, radius, range_filter);
+                        }
+                    }));
+            }
+
+            // wait for the completion
+            WaitAllSuccess(futs);
+        } catch (const std::exception& e) {
+            LOG_KNOWHERE_WARNING_ << "faiss inner error: " << e.what();
+            return expected<DataSetPtr>::Err(Status::faiss_inner_error, e.what());
         }
-
-        // wait for the completion
-        WaitAllSuccess(futs);
 
         //
         RangeSearchResult range_search_result =
@@ -2297,11 +2327,11 @@ class HNSWIndexNodeWithFallback : public IndexNode {
 
     expected<DataSetPtr>
     CalcDistByIDs(const DataSetPtr dataset, const BitsetView& bitset, const int64_t* labels, const size_t labels_len,
-                  milvus::OpContext* op_context) const override {
+                  const bool is_cosine, milvus::OpContext* op_context) const override {
         if (use_base_index) {
-            return base_index->CalcDistByIDs(dataset, bitset, labels, labels_len, op_context);
+            return base_index->CalcDistByIDs(dataset, bitset, labels, labels_len, is_cosine, op_context);
         } else {
-            return fallback_search_index->CalcDistByIDs(dataset, bitset, labels, labels_len, op_context);
+            return fallback_search_index->CalcDistByIDs(dataset, bitset, labels, labels_len, is_cosine, op_context);
         }
     };
 
@@ -2387,13 +2417,22 @@ class BaseFaissRegularIndexHNSWSQNode : public BaseFaissRegularIndexHNSWNode {
 
         // create an index
         const bool is_cosine = IsMetricType(hnsw_cfg.metric_type.value(), metric::COSINE);
+        const bool is_sq4u = sq_type.value() == faiss::ScalarQuantizer::QT_4bit_uniform;
 
         // should refine be used?
         std::unique_ptr<faiss::Index> final_index;
 
         auto train_index = [&](const float* data, const int i, const int64_t rows) {
             std::unique_ptr<faiss::IndexHNSW> hnsw_index;
-            if (is_cosine) {
+            if (is_sq4u && is_cosine) {
+                // Create IndexHNSWSQ4UniformCosine for COSINE
+                hnsw_index =
+                    std::make_unique<faiss::IndexHNSWSQ4UniformCosine>(dim, sq_type.value(), hnsw_cfg.M.value());
+            } else if (is_sq4u && metric.value() == faiss::METRIC_INNER_PRODUCT) {
+                // Create IndexHNSWSQ4UniformIP for IP
+                hnsw_index = std::make_unique<faiss::IndexHNSWSQ4UniformIP>(dim, sq_type.value(), hnsw_cfg.M.value());
+            } else if (is_cosine) {
+                // Other quantizers with COSINE
                 hnsw_index = std::make_unique<faiss::IndexHNSWSQCosine>(dim, sq_type.value(), hnsw_cfg.M.value());
             } else {
                 hnsw_index =

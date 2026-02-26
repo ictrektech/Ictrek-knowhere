@@ -1,5 +1,3 @@
-#include <cstring>
-
 #ifndef USE_AIO
 #include "linux_aligned_file_reader.h"
 
@@ -326,7 +324,7 @@ LinuxAlignedFileReader::~LinuxAlignedFileReader() {
 }
 
 namespace ioctx {
-static thread_local io_context_t ctx;
+  static thread_local io_context_t ctx;
 };
 
 void *LinuxAlignedFileReader::get_ctx(int flag) {
