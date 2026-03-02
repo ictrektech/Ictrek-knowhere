@@ -140,6 +140,12 @@ static std::set<std::string> legal_support_mmap_knowhere_index = {
     IndexEnum::INDEX_HNSW_PQ,
     IndexEnum::INDEX_HNSW_PRQ,
 
+    // diskann
+    IndexEnum::INDEX_DISKANN,
+
+    // odinann
+    IndexEnum::INDEX_ODINANN,
+
     // sparse index
     IndexEnum::INDEX_SPARSE_INVERTED_INDEX,
     IndexEnum::INDEX_SPARSE_WAND,
@@ -154,6 +160,7 @@ static std::set<std::string> legal_support_emb_list_knowhere_index = {
     IndexEnum::INDEX_FAISS_IVFFLAT,
     IndexEnum::INDEX_FAISS_IVFFLAT_CC,
     IndexEnum::INDEX_DISKANN,
+    IndexEnum::INDEX_ODINANN,
 #ifdef KNOWHERE_WITH_CARDINAL
     IndexEnum::INDEX_CARDINAL_TIERED,
 #endif
